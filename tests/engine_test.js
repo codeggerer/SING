@@ -373,28 +373,28 @@ async function runTestSuite() {
   // TEST SUITE 2: UltraStar File Parser & Sync Math
   console.log('\n--- Test Suite 2: UltraStar .txt Parser & Syllable Segmentation ---');
   const sampleTxt = `
-#TITLE:Don't Stop Me Now
-#ARTIST:Queen
+#TITLE:Aura Lea
+#ARTIST:Traditional
 #BPM:308,8
 #GAP:162,92
 #VIDEO:v=HgzGwKwLmgM
-: 21 6 55 To
-: 28 5 55 night
-: 34 9 53 ~
+: 21 6 55 As 
+: 28 5 55 the 
+: 34 9 53 black- 
 - 43
-: 51 4 53 I'm 
-: 56 5 53 gon
-: 61 6 57 na 
-: 67 7 60 have 
-: 74 7 65 my
-: 82 25 64 self
+: 51 4 53 bird 
+: 56 5 53 in 
+: 61 6 57 the 
+: 67 7 60 spring 
+: 74 7 65 'neath 
+: 82 25 64 the 
 - 108
 E
   `.trim();
 
   const parsed = parseUltraStarTxt(sampleTxt);
-  assert(parsed.title === "Don't Stop Me Now", 'Title parsed correctly');
-  assert(parsed.artist === 'Queen', 'Artist parsed correctly');
+  assert(parsed.title === "Aura Lea", 'Title parsed correctly');
+  assert(parsed.artist === 'Traditional', 'Artist parsed correctly');
   assert(parsed.bpm === 308.8, 'BPM parsed with comma conversion');
   assert(parsed.videoId === 'HgzGwKwLmgM', 'Video ID extracted from URL pattern');
   assert(parsed.tracks.length === 1, 'Single lead vocal track created');
@@ -492,21 +492,21 @@ E
   // TEST SUITE 5: Studio vs Video Offset Calculation
   console.log('\n--- Test Suite 5: Studio Offset Alignment Engine ---');
   const sampleUltraLines = [
-    { startTime: 37.7, text: 'Today is gonna be the day that they re gonna throw it back to you' },
-    { startTime: 43.1, text: 'By now you shouldve somehow realized what you gotta do' },
-    { startTime: 49.3, text: 'I dont believe that anybody feels the way I do about you now' },
+    { startTime: 37.7, text: 'Twinkle twinkle little star how I wonder what you are' },
+    { startTime: 43.1, text: 'Up above the world so high like a diamond in the sky' },
+    { startTime: 49.3, text: 'Twinkle twinkle little star how I wonder what you are' },
   ];
 
   const sampleLrcText = `
-[00:14.20] Today is gonna be the day that they re gonna throw it back to you
-[00:19.60] By now you shouldve somehow realized what you gotta do
-[00:25.80] I dont believe that anybody feels the way I do about you now
+[00:14.20] Twinkle twinkle little star how I wonder what you are
+[00:19.60] Up above the world so high like a diamond in the sky
+[00:25.80] Twinkle twinkle little star how I wonder what you are
   `.trim();
 
-  // Wonderwall: Video starts at 37.7s, Studio starts at 14.2s.
+  // Video starts at 37.7s, Studio starts at 14.2s.
   // Offset candidate = 14.2 - 37.7 = -23.5s!
   const offset = calculateUltraStarStudioOffset(sampleUltraLines, sampleLrcText);
-  assert(Math.abs(offset - (-23.5)) < 0.1, `Wonderwall studio offset correctly calculated as -23.50s (actual: ${offset}s)`);
+  assert(Math.abs(offset - (-23.5)) < 0.1, `Studio offset correctly calculated as -23.50s (actual: ${offset}s)`);
 
   // TEST SUITE 6: Live Server API Endpoints
   console.log('\n--- Test Suite 6: Live Server HTTP Endpoints & API Delivery ---');
