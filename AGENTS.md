@@ -63,6 +63,13 @@ When modifying or expanding the codebase, adhere to these architectural rules:
   $$\text{songTime} = \text{rawPlayerTime} - \text{videoOffsetSec}$$
 - In `public/app.js`, high-resolution time is interpolated between player ticks via `performance.now()`.
 
+### 6. Strict Copyright Protection & Zero-Piracy Invariant
+- **No Copyrighted Audio or Media in Git**: Never track, add, or commit proprietary audio files (`*.mp3`, `*.wav`, `*.m4a`, `*.flac`, `*.ogg`, `*.aac`, etc.) or Demucs separated stems (`output/htdemucs/`, etc.). All audio extensions must remain strictly ignored in `.gitignore`.
+- **No Commercial Lyrics or Charts in Git**: Never commit full commercial lyrics or UltraStar charts of copyrighted songs to the repository. The local chart cache (`usdb_cache/`) and output directory (`output/`) must stay git-ignored.
+- **Public Domain Test Fixtures Only**: Unit tests (`tests/engine_test.js`, `tests/test_karaoke_pipeline.py`) and ground-truth sample templates (`ground_truth_sample.json`) must strictly use public-domain songs (e.g., *Aura Lea*, *Twinkle Twinkle Little Star*) or synthetic audio models (NumPy sine waves). Never paste commercial lyrics into test code.
+- **No Hardcoded Credentials or API Keys**: Never commit credentials, passwords, or session cookies (`usdb_config.json`, `.env`, `config.local.json`). Always use `.env.example` as a template and ensure real secrets remain git-ignored.
+- **Pre-Commit Verification Rule**: Always run `git status` before committing to confirm that no audio, lyrics, or credential files are staged.
+
 ---
 
 ## 🛠️ Developer & Agent Command Cheat Sheet
@@ -89,6 +96,24 @@ node tests/engine_test.js
 
 # Run Genetic Parameter Optimization
 ./venv/bin/python optimizer.py "song.mp3" --ground-truth ground_truth_sample.json
+```
+
+### Local Audio Acquisition (yt-dlp) for Pipeline Testing
+To test the AI generator or optimizer locally on any song, download the audio using `yt-dlp`. Because `*.mp3`, `*.wav`, and `output/` are in `.gitignore`, these files remain strictly local and will never be tracked or committed to git:
+
+```bash
+# 1. Download audio from a YouTube video URL as MP3
+yt-dlp -x --audio-format mp3 -o "test_song.mp3" "https://www.youtube.com/watch?v=VIDEO_ID"
+
+# 2. Or download by search query directly
+yt-dlp -x --audio-format mp3 -o "test_song.mp3" "ytsearch1:Artist Title Official Audio"
+
+# 3. Run AI karaoke generator on the downloaded local file
+./venv/bin/python generate_karaoke.py "test_song.mp3" --artist "Artist Name" --title "Song Title"
+
+# Generated outputs will land in ./output/ (git-ignored):
+# - ./output/Artist Name - Song Title.txt
+# - ./output/Artist Name - Song Title [Instrumental].wav
 ```
 
 ---
