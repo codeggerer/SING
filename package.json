@@ -1,9 +1,31 @@
 {
-  "name": "sing-party-web",
+  "name": "sing",
   "version": "1.0.0",
-  "description": "Nintendo Let's Sing / SingStar Style Web-App für jeden beliebigen Song (YouTube + LRCLIB + Web Audio Pitch Detection)",
+  "description": "Full-stack browser-based SingStar & Let's Sing-style karaoke studio with real-time pitch detection and AI chart generator",
   "main": "server.js",
+  "private": true,
   "scripts": {
-    "start": "node server.js"
-  }
+    "start": "node server.js",
+    "test": "node tests/engine_test.js",
+    "test:engine": "node tests/engine_test.js",
+    "test:ai": "python3 -m unittest tests/test_karaoke_pipeline.py"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/codeggerer/SING.git"
+  },
+  "keywords": [
+    "karaoke",
+    "singstar",
+    "pitch-detection",
+    "mc-leod-pitch-method",
+    "web-audio-api",
+    "ultrastar",
+    "spotify",
+    "youtube"
+  ],
+  "engines": {
+    "node": ">=16.0.0"
+  },
+  "license": "MIT"
 }
