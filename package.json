@@ -1,0 +1,9 @@
+{
+  "name": "sing-party-web",
+  "version": "1.0.0",
+  "description": "Nintendo Let's Sing / SingStar Style Web-App für jeden beliebigen Song (YouTube + LRCLIB + Web Audio Pitch Detection)",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  }
+}

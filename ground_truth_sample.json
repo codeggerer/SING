@@ -1,0 +1,79 @@
+{
+  "title": "Twinkle Twinkle Little Star",
+  "artist": "Traditional",
+  "bpm": 120,
+  "key": "C Major",
+  "total_notes": 14,
+  "notes": [
+    {
+      "syllable": "Twin-",
+      "pitch": 60,
+      "duration_note": 0.5
+    },
+    {
+      "syllable": "kle,",
+      "pitch": 60,
+      "duration_note": 0.5
+    },
+    {
+      "syllable": "twin-",
+      "pitch": 67,
+      "duration_note": 0.5
+    },
+    {
+      "syllable": "kle,",
+      "pitch": 67,
+      "duration_note": 0.5
+    },
+    {
+      "syllable": "lit-",
+      "pitch": 69,
+      "duration_note": 0.5
+    },
+    {
+      "syllable": "tle",
+      "pitch": 69,
+      "duration_note": 0.5
+    },
+    {
+      "syllable": "star,",
+      "pitch": 67,
+      "duration_note": 1.0
+    },
+    {
+      "syllable": "How",
+      "pitch": 65,
+      "duration_note": 0.5
+    },
+    {
+      "syllable": "I",
+      "pitch": 65,
+      "duration_note": 0.5
+    },
+    {
+      "syllable": "won-",
+      "pitch": 64,
+      "duration_note": 0.5
+    },
+    {
+      "syllable": "der",
+      "pitch": 64,
+      "duration_note": 0.5
+    },
+    {
+      "syllable": "what",
+      "pitch": 62,
+      "duration_note": 0.5
+    },
+    {
+      "syllable": "you",
+      "pitch": 62,
+      "duration_note": 0.5
+    },
+    {
+      "syllable": "are.",
+      "pitch": 60,
+      "duration_note": 1.0
+    }
+  ]
+}

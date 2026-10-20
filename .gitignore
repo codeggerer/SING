@@ -1,0 +1,69 @@
+# ==============================================================================
+# SING! Karaoke Engine & Web Studio - .gitignore
+# ==============================================================================
+
+# Operating System Files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Audio & Media Files (Copyright protection & repository size limits)
+*.mp3
+*.wav
+*.m4a
+*.flac
+*.ogg
+*.aac
+*.wma
+*.aiff
+*.alac
+*.opus
+
+# Private Credentials & Session Data
+usdb_config.json
+.env
+.env.*
+*.pem
+*.key
+secrets/
+
+# Generated Pipeline Outputs & Temporary Files
+output/
+usdb_cache/
+*.npz
+*.npy
+unsicher_ground_truth.json
+*ground_truth.json
+!ground_truth_sample.json
+
+# Python & ML Environments
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+venv/
+.venv/
+env/
+*.egg-info/
+.eggs/
+dist/
+build/
+.cache/
+models/
+
+# Node.js & Dependencies
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Editor & IDE Configurations
+.vscode/
+.idea/
+*.swp
+*.swo
+*~

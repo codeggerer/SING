@@ -1,0 +1,491 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SING! Web Studio – YouTube &amp; Spotify Karaoke Game</title>
+  <meta name="referrer" content="strict-origin-when-cross-origin" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <!-- Ambient Animated Background -->
+  <div class="bg-glow bg-glow-1"></div>
+  <div class="bg-glow bg-glow-2"></div>
+
+  <!-- Top Navigation / Status Bar -->
+  <header class="topbar">
+    <div class="brand" id="btnBackHome" title="Zurück zur Song-Auswahl">
+      <span class="brand-icon">🎤</span>
+      <div>
+        <span class="brand-title">SING<span class="accent">!</span> PARTY</span>
+        <span class="brand-sub" id="catalogStatusSub">SingStar/UltraStar Studio-Engine + YouTube &amp; Spotify</span>
+      </div>
+    </div>
+
+    <!-- Mode Switcher: YouTube vs. Spotify Premium -->
+    <div class="source-switcher" role="group" aria-label="Audio-Quelle wählen">
+      <button class="source-btn active" id="btnModeYoutube" title="Songs über YouTube abspielen">
+        📺 YouTube
+      </button>
+      <button class="source-btn" id="btnModeSpotify" title="Songs über Spotify Premium abspielen">
+        🟢 Spotify <span class="spotify-status-pill" id="spotifyTopBadge">Verbinden</span>
+      </button>
+    </div>
+
+    <div class="topbar-controls">
+      <!-- USDB Account Modal Trigger -->
+      <button class="pill-btn usdb-pill" id="btnOpenUsdbModal" title="USDB Account verbinden (28.000 Songs)">
+        ★ USDB <span class="usdb-status-pill" id="usdbTopBadge">Verbinden</span>
+      </button>
+
+      <!-- Upload Custom UltraStar .txt -->
+      <label class="pill-btn file-label" title="Eigene UltraStar .txt Datei laden">
+        📂 .txt laden
+        <input type="file" id="inputTxtFile" accept=".txt" hidden />
+      </label>
+
+      <!-- Live Mic Status Pill -->
+      <button class="pill-btn" id="btnToggleMic">
+        <span class="status-dot" id="micStatusDot"></span>
+        <span id="micStatusText">Mikrofon aktivieren</span>
+        <span class="live-note-badge" id="topLiveNote">--</span>
+      </button>
+
+      <!-- Latency & Calibration Modal Trigger -->
+      <button class="pill-btn" id="btnOpenSettings">
+        ⚙️ Latenz &amp; Mikrofon (<span id="topLatencyVal">80</span> ms)
+      </button>
+    </div>
+  </header>
+
+  <!-- MAIN CONTAINER -->
+  <main class="main-container">
+    <!-- VIEW 1: SONG SEARCH & LOBBY -->
+    <section id="viewLobby" class="view active">
+      <div class="hero-box">
+        <h1>Sing mit <span class="gradient-text">Original-Melodien auf YouTube &amp; Spotify</span></h1>
+        <p class="hero-desc">
+          Über <strong>2.500+ handvermessene SingStar/UltraStar-Songs</strong> (echte Gesangsnoten &amp; Intervalle) + universelle LRCLIB-Suche. Spiele wahlweise über <strong>📺 YouTube</strong> (mit Auto-Fallback gegen gesperrte Videos) oder direkt über <strong>🟢 Spotify Premium</strong> in perfekter Studio-Synchronisation!
+        </p>
+
+        <form id="searchForm" class="search-bar">
+          <input
+            type="text"
+            id="searchInput"
+            placeholder="Song oder Künstler suchen (z. B. Queen, ABBA, Adele, Oasis, Eminem, Taylor Swift, Apache...)"
+            autocomplete="off"
+          />
+          <button type="submit" id="btnSearch" class="primary-btn">
+            🔍 Song suchen
+          </button>
+        </form>
+
+        <!-- Quick Presets (100% Verified Original SingStar/UltraStar Charts) -->
+        <div class="quick-tags">
+          <span class="tag-label">★ 100% Original-Melodie:</span>
+          <button class="tag-btn" data-query="Queen Don't Stop Me Now">Queen – Don't Stop Me Now</button>
+          <button class="tag-btn" data-query="ABBA Dancing Queen">ABBA – Dancing Queen</button>
+          <button class="tag-btn" data-query="Oasis Wonderwall">Oasis – Wonderwall</button>
+          <button class="tag-btn" data-query="Robbie Williams Angels">Robbie Williams – Angels</button>
+          <button class="tag-btn" data-query="Adele Someone Like You">Adele – Someone Like You</button>
+          <button class="tag-btn" data-query="Backstreet Boys I Want It That Way">Backstreet Boys – I Want It That Way</button>
+          <button class="tag-btn" data-query="Lady Gaga Bad Romance">Lady Gaga – Bad Romance</button>
+          <button class="tag-btn" data-query="Linkin Park In The End">Linkin Park – In The End</button>
+        </div>
+      </div>
+
+      <!-- Loading Indicator -->
+      <div id="searchLoading" class="loading-box hidden">
+        <div class="spinner"></div>
+        <p id="searchLoadingText">Durchsuche SingStar/UltraStar-Datenbank &amp; Lyrics...</p>
+      </div>
+
+      <!-- Search Results Grid -->
+      <div id="searchResultsSection" class="results-section hidden">
+        <div class="section-header">
+          <h2 id="resultsHeading">Gefundene Songs</h2>
+        </div>
+        <div id="resultsGrid" class="results-grid"></div>
+      </div>
+    </section>
+
+    <!-- VIEW 2: STAGE / SINGING GAME VIEW -->
+    <section id="viewStage" class="view">
+      <!-- Top Stage Header: Song Info + Score HUD -->
+      <div class="stage-header">
+        <div class="stage-song-meta">
+          <button id="btnLeaveStage" class="ghost-btn">← Song wechseln</button>
+          <img id="stageCover" class="stage-cover" src="" alt="Cover" />
+          <div>
+            <h2 id="stageTitle">Song Title</h2>
+            <p id="stageArtist">Artist Name</p>
+            <div class="stage-badges">
+              <span class="badge badge-gold" id="badgeChartSource">★ Original UltraStar Melodie</span>
+              <span class="badge" id="badgeBpm">120 BPM</span>
+              <span class="badge badge-sync" id="badgeSyncInfo">Sync aktiv</span>
+              <select id="selectDuetTrack" class="duet-select hidden">
+                <option value="0">🎤 Stimme 1 (Lead)</option>
+                <option value="1">🎤 Stimme 2 (Duett)</option>
+              </select>
+            </div>
+          </div>
+        </div>
+
+        <!-- Score & Multiplier HUD -->
+        <div class="score-hud">
+          <div class="hud-stat">
+            <span class="hud-label">TREFFERQUOTE</span>
+            <span class="hud-value" id="hudAccuracy">0%</span>
+          </div>
+          <div class="hud-stat">
+            <span class="hud-label">COMBO</span>
+            <span class="hud-value combo-val" id="hudCombo">1x</span>
+          </div>
+          <div class="hud-stat score-main">
+            <span class="hud-label">PUNKTE</span>
+            <span class="hud-value" id="hudScore">00000</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Middle Stage: Left Player Deck (YouTube OR Spotify) + Right Pitch Highway -->
+      <div class="stage-arena">
+        <!-- Left Panel: Audio/Video Deck + Sync Controls -->
+        <div class="video-panel">
+          <!-- SUB-DECK A: YOUTUBE PLAYER -->
+          <div id="deckYoutube">
+            <div class="yt-wrapper">
+              <div id="ytPlayerContainer"></div>
+              <div id="ytOverlayStatus" class="yt-overlay-status">Lade YouTube-Video...</div>
+            </div>
+
+            <!-- Video Selector & Manual URL -->
+            <div class="video-switcher">
+              <div class="switcher-row">
+                <label for="selectYtVideo">YouTube-Version:</label>
+                <select id="selectYtVideo"></select>
+              </div>
+              <div class="switcher-row">
+                <input
+                  type="text"
+                  id="inputCustomYt"
+                  placeholder="Oder eigene YouTube-URL / ID einfügen..."
+                />
+                <button id="btnApplyCustomYt" class="small-btn">Laden</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- SUB-DECK B: SPOTIFY PREMIUM PLAYER -->
+          <div id="deckSpotify" class="hidden">
+            <div class="spotify-player-card">
+              <div class="spotify-disc-wrap">
+                <img id="spotifyDeckCover" class="spotify-deck-cover" src="" alt="Spotify Cover" />
+                <div class="spotify-live-Wave" id="spotifyWaveIndicator">🟢 SPOTIFY STUDIO STREAM</div>
+              </div>
+              <div class="spotify-track-meta">
+                <div class="spotify-track-title" id="spotifyTrackTitle">Lade Spotify-Track...</div>
+                <div class="spotify-track-artist" id="spotifyTrackArtist">--</div>
+              </div>
+
+              <!-- Spotify Progress & Seek Bar -->
+              <div class="spotify-progress-row">
+                <span id="spotifyTimeCur">0:00</span>
+                <input type="range" id="spotifySeekSlider" min="0" max="1000" value="0" />
+                <span id="spotifyTimeDur">0:00</span>
+              </div>
+
+              <!-- Spotify Track Switcher & Volume -->
+              <div class="video-switcher">
+                <div class="switcher-row">
+                  <label for="selectSpotifyTrack">Spotify-Track:</label>
+                  <select id="selectSpotifyTrack"></select>
+                </div>
+                <div class="switcher-row">
+                  <label for="sliderSpotifyVol">Lautstärke:</label>
+                  <input type="range" id="sliderSpotifyVol" min="0" max="100" value="85" />
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Sync Mode Preset & Fine-Tuning (Works for both YouTube & Spotify!) -->
+          <div class="sync-box">
+            <div class="sync-header">
+              <span>⏱️ <strong>Gesangs-Start Offset:</strong> <strong id="lblVideoOffset">0.00s</strong></span>
+              <span class="sync-hint" id="lblFirstLyricTime">1. Ton bei 0:00</span>
+            </div>
+            <div class="sync-mode-row">
+              <button class="small-btn" id="btnUseStudioSync" title="Synchronisiert den Start der UltraStar-Noten automatisch auf den offiziellen Spotify/LRCLIB Studio-Start">
+                🎧 Studio/Spotify-Start
+              </button>
+              <button class="small-btn" id="btnUseOriginalGap" title="Nutzt den unveränderten #GAP-Wert aus der UltraStar .txt Datei">
+                🎬 Original Video-GAP
+              </button>
+            </div>
+            <div class="sync-buttons">
+              <button class="small-btn" data-offset-delta="-1.0">-1.0s</button>
+              <button class="small-btn" data-offset-delta="-0.2">-0.2s</button>
+              <button class="small-btn accent-btn" id="btnSnapFirstLyric" title="Klicke genau in dem Moment, in dem die allererste Silbe gesungen wird!">
+                🎯 1. Silbe startet JETZT!
+              </button>
+              <button class="small-btn" data-offset-delta="0.2">+0.2s</button>
+              <button class="small-btn" data-offset-delta="1.0">+1.0s</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Right/Main: Let's Sing Pitch Highway & Lyrics -->
+        <div class="highway-panel">
+          <!-- Live Feedback Banner -->
+          <div class="highway-top-bar">
+            <div class="pitch-feedback" id="pitchFeedbackBadge">Bereit zum Singen!</div>
+            <div class="speech-feedback" id="speechFeedbackBadge" title="Spracherkennungs-Bonus">
+              🗣️ Text-Erkennung: <span id="speechTextPreview">Aktiv</span>
+            </div>
+            <div class="mic-live-readout">
+              <span>Du singst: <strong id="stageLiveNote">--</strong> (<span id="stageLiveHz">0</span> Hz)</span>
+              <span>Ziel-Note: <strong id="stageTargetNote">--</strong></span>
+            </div>
+          </div>
+
+          <!-- 60FPS Canvas for Pitch Bars & User Singing Trail -->
+          <div class="canvas-container">
+            <canvas id="pitchCanvas" width="960" height="360"></canvas>
+          </div>
+
+          <!-- Karaoke Lyrics Display (Current & Next Line) -->
+          <div class="lyrics-prompter">
+            <div class="phrase-progress-bar">
+              <div class="phrase-progress-fill" id="phraseProgressFill"></div>
+            </div>
+            <div class="lyric-line current-line" id="lyricCurrentLine">
+              Wähle einen Song, um zu starten!
+            </div>
+            <div class="lyric-line next-line" id="lyricNextLine">
+              ...
+            </div>
+          </div>
+
+          <!-- Bottom Playback & Difficulty Bar -->
+          <div class="stage-controls-bar">
+            <div class="playback-btns">
+              <button id="btnPlayPause" class="primary-btn">▶️ Start / Pause</button>
+              <button id="btnRestartSong" class="small-btn">⏮️ Neustart</button>
+              <button id="btnSkipToVocals" class="accent-btn" title="Springt direkt 3 Sekunden vor den ersten Gesangseinsatz">
+                ⏩ Zum Gesangseinsatz springen
+              </button>
+            </div>
+
+            <div class="difficulty-group">
+              <label>Toleranz:</label>
+              <select id="selectDifficulty">
+                <option value="2.2">Party / Leicht (±2 Halbtöne)</option>
+                <option value="1.5" selected>SingStar Normal (±1.5 Halbtöne)</option>
+                <option value="0.9">Profi (±1 Halbton)</option>
+              </select>
+              <label class="checkbox-label" title="Magnet-Hilfe glättet leichtes Vibrato auf dem Zielbalken">
+                <input type="checkbox" id="chkPitchMagnet" checked />
+                Pitch-Magnet
+              </label>
+              <label class="checkbox-label" title="Erlaubt das Singen in deiner eigenen tiefen oder hohen Oktave">
+                <input type="checkbox" id="chkOctaveAgnostic" checked />
+                Oktav-Freiheit
+              </label>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- MODAL 1: SPOTIFY PREMIUM CONNECTION -->
+  <div id="modalSpotify" class="modal-backdrop hidden">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3>🟢 Spotify Premium Web-Player verbinden</h3>
+        <button id="btnCloseSpotifyModal" class="close-btn">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="settings-block">
+          <h4>So verbindest du deinen Spotify Premium Account (einmalig 30 Sek.):</h4>
+          <ol class="setup-steps">
+            <li>
+              Öffne das <a href="https://developer.spotify.com/dashboard" target="_blank" rel="noopener">Spotify Developer Dashboard</a> und klicke auf <strong>„Create App“</strong>.
+            </li>
+            <li>
+              Trage unter <strong>Redirect URIs</strong> exakt diese Adresse ein:<br />
+              <div class="copy-uri-row">
+                <code id="lblRedirectUri">http://127.0.0.1:3000/</code>
+                <button type="button" id="btnCopyRedirectUri" class="small-btn">📋 Kopieren</button>
+              </div>
+              <small style="color: var(--text-muted)">(Hinweis: Spotify verlangt seit kurzem oft <code>http://127.0.0.1:3000/</code> statt <code>localhost</code>. Falls du auf <code>localhost</code> bist, wechselt der Button unten automatisch auf <code>127.0.0.1:3000</code>!)</small>
+            </li>
+            <li>
+              Setze bei <em>„Which API/SDKs are you planning to use?“</em> das Häkchen bei <strong>Web API</strong> &amp; <strong>Web Playback SDK</strong> und kopiere deine <strong>Client ID</strong> hier rein:
+            </li>
+          </ol>
+
+          <div class="switcher-row" style="margin-top: 12px;">
+            <input
+              type="text"
+              id="inputSpotifyClientId"
+              placeholder="Deine Spotify Client ID einfügen (z. B. 4a8b9c...)"
+              autocomplete="off"
+            />
+            <button type="button" id="btnSpotifyOAuthLogin" class="primary-btn spotify-btn">
+              🟢 Mit Spotify einloggen
+            </button>
+          </div>
+        </div>
+
+        <div class="settings-block">
+          <h4>Alternativ: Direktes Access-Token einfügen (für Schnelltest)</h4>
+          <p class="settings-desc">
+            Falls du schon ein OAuth Access-Token (mit <code>streaming</code> Scope) hast, kannst du es auch direkt hier aktivieren:
+          </p>
+          <div class="switcher-row">
+            <input
+              type="password"
+              id="inputSpotifyDirectToken"
+              placeholder="Access-Token (BQD...)"
+              autocomplete="off"
+            />
+            <button type="button" id="btnApplySpotifyToken" class="small-btn">Token aktivieren</button>
+          </div>
+        </div>
+
+        <div id="spotifyModalStatus" class="spotify-status-box">
+          Status: Noch nicht verbunden
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" id="btnSpotifyLogout" class="ghost-btn hidden">Verbindung trennen</button>
+        <button type="button" id="btnCloseSpotifyFooter" class="small-btn">Schließen</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- MODAL 2: LATENCY, MICROPHONE & CALIBRATION -->
+  <div id="modalSettings" class="modal-backdrop hidden">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3>⚙️ Mikrofon, Stabilisierung &amp; Kopfhörer-Latenz</h3>
+        <button id="btnCloseSettings" class="close-btn">✕</button>
+      </div>
+
+      <div class="modal-body">
+        <!-- Microphone Setup -->
+        <div class="settings-block">
+          <h4>1. Mikrofon-Test &amp; Filter</h4>
+          <p class="settings-desc">
+            Tipp: Wenn du Kopfhörer trägst, lasse <strong>Echo-Unterdrückung aus</strong> – sonst filtert der Browser deine Stimme weg, sobald du denselben Ton wie das Lied singst!
+          </p>
+          <div class="mic-test-row">
+            <label for="selectAudioInput">Eingabegerät:</label>
+            <select id="selectAudioInput">
+              <option value="">Standard-Mikrofon</option>
+            </select>
+          </div>
+          <div class="mic-test-row">
+            <label class="checkbox-label">
+              <input type="checkbox" id="chkEchoCancel" />
+              Browser Echo-Unterdrückung aktivieren (nur nötig ohne Kopfhörer über Lautsprecher)
+            </label>
+          </div>
+          <div class="meter-wrapper">
+            <div class="meter-fill" id="micVolumeBar"></div>
+          </div>
+          <div class="mic-stats-row">
+            <span>Erkannte Note: <strong id="modalLiveNote">--</strong></span>
+            <span>Frequenz: <strong id="modalLiveHz">0 Hz</strong></span>
+            <span>Stimm-Klarheit: <strong id="modalLiveClarity">0%</strong></span>
+          </div>
+        </div>
+
+        <!-- Latency Slider + Auto Calibration -->
+        <div class="settings-block">
+          <h4>2. Kopfhörer- &amp; Audio-Latenz ausgleichen</h4>
+          <p class="settings-desc">
+            Gleicht die Verzögerung zwischen Musik und deinem Mikrofon-Signal aus:
+          </p>
+          <div class="slider-row">
+            <input type="range" id="sliderLatency" min="-100" max="450" step="5" value="80" />
+            <span class="slider-val"><strong id="lblLatencyMs">80</strong> ms</span>
+          </div>
+          <div class="calibration-box">
+            <div>
+              <strong>Automatische Klatsch-Kalibrierung:</strong>
+              <p id="calibrationStatusText">Es ertönen 4 Pieptöne. Klatsche oder singe „Ta!“ im Rhythmus mit.</p>
+            </div>
+            <button id="btnRunCalibration" class="accent-btn">🥁 Latenz jetzt messen</button>
+          </div>
+        </div>
+
+        <!-- Input Gain / Noise Gate -->
+        <div class="settings-block">
+          <h4>3. Mikrofon-Empfindlichkeit (Noise Gate)</h4>
+          <div class="slider-row">
+            <input type="range" id="sliderGate" min="1" max="40" step="1" value="5" />
+            <span class="slider-val">Schwellwert: <strong id="lblGateVal">5</strong>%</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="modal-footer">
+        <button id="btnSaveSettings" class="primary-btn">Fertig &amp; Speichern</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- USDB Account Modal -->
+  <div id="modalUsdb" class="modal-backdrop hidden" role="dialog" aria-modal="true">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3>★ USDB Account verbinden</h3>
+        <button id="btnCloseUsdbModal" class="btn-icon">✕</button>
+      </div>
+      <div class="modal-body">
+        <p class="settings-desc">
+          Verbinde deinen kostenlosen Account von <strong>usdb.animux.de</strong>, um direkt über die Suchleiste auf über <strong>28.000 handerstellte Original-Songs</strong> zuzugreifen!
+        </p>
+
+        <!-- Connected State -->
+        <div id="usdbStatusArea" class="settings-block hidden">
+          <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px;">
+            <div>
+              <span class="badge badge-gold" style="font-size: 0.85rem;">🟢 USDB Aktiviert</span>
+              <p id="usdbLoggedUserText" style="margin: 6px 0 0; font-size: 0.95rem;">Eingeloggt als: <strong>--</strong></p>
+            </div>
+            <button id="btnUsdbLogout" class="accent-btn" style="background: rgba(255,42,133,0.2); border-color: #ff2a85; color: #ff2a85;">Abmelden</button>
+          </div>
+          <p class="settings-desc" style="color: #18e882;">
+            ✓ Alle 28.000 Songs aus USDB werden jetzt automatisch in der Suchleiste gefunden!
+          </p>
+        </div>
+
+        <!-- Login Form -->
+        <form id="formUsdbLogin">
+          <div class="settings-block">
+            <label for="usdbUsername" style="display: block; font-weight: 600; margin-bottom: 6px;">USDB Benutzername:</label>
+            <input type="text" id="usdbUsername" class="search-input" style="width: 100%; box-sizing: border-box; padding: 10px 14px; font-size: 1rem; border-radius: 8px;" placeholder="Dein usdb.animux.de Login" required autocomplete="username" />
+          </div>
+          <div class="settings-block">
+            <label for="usdbPassword" style="display: block; font-weight: 600; margin-bottom: 6px;">USDB Passwort:</label>
+            <input type="password" id="usdbPassword" class="search-input" style="width: 100%; box-sizing: border-box; padding: 10px 14px; font-size: 1rem; border-radius: 8px;" placeholder="Dein Passwort" required autocomplete="current-password" />
+          </div>
+          <div id="usdbLoginError" style="color: #ff2a85; font-size: 0.9rem; margin-bottom: 12px;" class="hidden"></div>
+          <button type="submit" id="btnSubmitUsdbLogin" class="primary-btn" style="width: 100%; padding: 12px; font-size: 1rem;">
+            Einloggen &amp; 28.000 Songs freischalten
+          </button>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <!-- YouTube IFrame API, Spotify Web Playback SDK & App Logic -->
+  <script src="https://www.youtube.com/iframe_api"></script>
+  <script src="https://sdk.scdn.co/spotify-player.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
