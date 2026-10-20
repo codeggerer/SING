@@ -164,10 +164,13 @@ def split_syllables(word: str, lang: str = "de", word_duration: float = 0.5) -> 
 def load_canonical_lyrics(
     lyrics_json_path: Path | str,
     vocals_file: Path | str,
+    pitch_data: Optional[Dict[str, Any]] = None,
+    hardware_profile: Optional[HardwareProfile] = None,
     progress_cb: Optional[Callable[[str, float, str], None]] = None,
 ) -> Optional[Tuple[List[Dict[str, Any]], str]]:
     """
     Loads and verifies canonical LyricsDoc from JSON.
+    Aligns and shapes syllables via Phase 4 MMS forced alignment, vowel weighting, and audio snapping.
     Returns (words, detected_lang) if valid, or None if validation fails.
     """
     path = Path(lyrics_json_path).resolve()
@@ -193,7 +196,13 @@ def load_canonical_lyrics(
                 print(f"⏱️ Korrigiere Lyrics-Audio-Offset: {offset:+.3f}s")
                 doc.lyricsOffsetSec = offset
 
-        words = doc.to_words_list()
+        from karaoke.align import align_lyrics_doc_to_audio
+        words = align_lyrics_doc_to_audio(
+            vocals_file,
+            doc,
+            pitch_data=pitch_data,
+            hardware_profile=hardware_profile,
+        )
         detected_lang = doc.language or "en"
         print(f"✅ Verwende {len(words)} Provider-Noten/Wörter ({doc.syncType})")
         if progress_cb:
@@ -210,13 +219,15 @@ def load_canonical_lyrics(
 
 def transcribe_lyrics(
     vocals_path: Path | str,
+    pitch_data: Optional[Dict[str, Any]] = None,
     hardware_profile: Optional[HardwareProfile] = None,
     model_selection: Optional[ModelSelection] = None,
     stage_cache: Optional[StageCache] = None,
     progress_cb: Optional[Callable[[str, float, str], None]] = None,
 ) -> Tuple[List[Dict[str, Any]], str]:
     """
-    Transcribes lyrics from vocal audio stem using Whisper (Faster-Whisper or Apple MLX-Whisper).
+    Transcribes lyrics from vocal audio stem using Whisper and refines
+    timing via Phase 4 MMS forced alignment.
     """
     # Check cache first
     if stage_cache:
@@ -303,7 +314,8 @@ def transcribe_lyrics(
             str(vocals_path),
             word_timestamps=True,
             vad_filter=True,
-            beam_size=5
+            condition_on_previous_text=False,
+            beam_size=5,
         )
 
         for segment in segments:
@@ -321,11 +333,25 @@ def transcribe_lyrics(
 
     print(f"✅ {len(words)} Wörter erkannt. Sprache: {detected_lang}")
 
+    # Phase 4: Refine Whisper words and timestamps with MMS forced alignment
+    try:
+        from karaoke.align import align_whisper_words
+        words = align_whisper_words(
+            vocals_path,
+            words,
+            pitch_data=pitch_data,
+            lang=detected_lang,
+            hardware_profile=hardware_profile,
+        )
+        print(f"🎯 Forced alignment abgeschlossen: {len(words)} Silben/Noten")
+    except Exception as e:
+        print(f"⚠️ Warnung: MMS Forced Alignment fehlgeschlagen ({e}), verwende Whisper-Timestamps.")
+
     # Save to stage cache
     if stage_cache:
         stage_cache.save_words(words, detected_lang)
 
     if progress_cb:
-        progress_cb("lyrics", 1.0, f"Transcribed {len(words)} words ({detected_lang})")
+        progress_cb("lyrics", 1.0, f"Transcribed & aligned {len(words)} syllables ({detected_lang})")
 
     return words, detected_lang

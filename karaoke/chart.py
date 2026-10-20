@@ -11,7 +11,10 @@ try:
 except ImportError:
     librosa = None
 
-from karaoke.config import USTAR_BPM, BEAT_DUR_SEC, GAP, DEFAULT_GENRE
+from karaoke.config import (
+    USTAR_BPM, BEAT_DUR_SEC, GAP, DEFAULT_GENRE,
+    MIN_NOTE_DUR_BEATS, MIN_NOTE_GAP_BEATS,
+)
 from karaoke.notes import (
     sec_to_beat, build_word_notes, apply_subharmonic_recovery, apply_scale_snapping
 )
@@ -106,29 +109,21 @@ def generate_ultrastar_chart(
                 else:
                     active_notes.append(r_note)
 
-        # Word-boundary Spacing:
-        # Guarantee a clean visual gap (at least 6 beats = 60 ms) between distinct words
+        # Note Formatting, Overlap Resolution & Minimum Timing (PLAN.md Phase 4 Task 4)
         for note_idx, note in enumerate(active_notes):
             s_pitch = note["pitch"]
             s_beat = sec_to_beat(note["start"])
             e_beat = sec_to_beat(note["end"])
 
-            # Word spacing
-            if note_idx == 0 and last_end_beat > 0:
-                min_start = last_end_beat + 6
-                if s_beat < min_start:
-                    s_beat = min_start
+            # Resolve overlaps only: guarantee at least MIN_NOTE_GAP_BEATS (1 beat = 10 ms)
+            if last_end_beat > 0 and s_beat < last_end_beat + MIN_NOTE_GAP_BEATS:
+                s_beat = last_end_beat + MIN_NOTE_GAP_BEATS
 
-            if e_beat - s_beat < 10:
-                e_beat = s_beat + 10
+            # Minimum duration: MIN_NOTE_DUR_BEATS (3 beats = 30 ms)
+            if e_beat < s_beat + MIN_NOTE_DUR_BEATS:
+                e_beat = s_beat + MIN_NOTE_DUR_BEATS
 
-            if s_beat < last_end_beat:
-                s_beat = last_end_beat + 2
-
-            if e_beat <= s_beat:
-                e_beat = s_beat + 10
-
-            d_beat = max(8, e_beat - s_beat)
+            d_beat = max(MIN_NOTE_DUR_BEATS, e_beat - s_beat)
             last_end_beat = s_beat + d_beat
 
             ultrastar_lines.append(f": {s_beat} {d_beat} {s_pitch} {note['text']}")

@@ -23,14 +23,17 @@ VOCAL_FMIN_MALE: float = 80.0
 VOCAL_FMIN_FEMALE: float = 115.0
 VOCAL_FMAX: float = 1050.0
 
-# Note & Syllable Timing Thresholds
+# Note & Syllable Timing Thresholds (PLAN.md Phase 4)
 MIN_WORD_DUR_FOR_SPLIT: float = 0.28   # Words shorter than 0.28s are never split
-MIN_WORD_DUR_CLAMP: float = 0.16       # Word end clamp margin
 MIN_MELISMA_DUR: float = 0.45          # Minimum duration for melisma check
 MELISMA_SEMITONE_DIFF: float = 1.0     # Semitone difference to trigger melisma
-PAUSE_BEAT_THRESHOLD_SEC: float = 1.25 # Silence before line pause break
-WORD_GAP_BEATS: int = 6                # Minimum visual gap beats between words
-MIN_NOTE_BEATS: int = 8                # Minimum note duration in beats
+MIN_NOTE_DUR_BEATS: int = 3            # Minimum note duration: 3 beats (30 ms)
+MIN_NOTE_GAP_BEATS: int = 1            # Minimum gap between notes: 1 beat (10 ms)
+PAUSE_BREAK_THRESHOLD_SEC: float = 0.6 # Silence before phrase line break (>= 0.6s)
+LINE_MAX_WORDS: int = 8                # Max words per line before line break
+ONSET_SNAP_WINDOW_SEC: float = 0.120   # Syllable onset snap search window (±120 ms)
+SILENT_GAP_NOTE_END_SEC: float = 0.120 # Silent gap threshold to cut note end (120 ms)
+VOICED_TAIL_MARGIN_SEC: float = 0.040  # Margin added after last voiced frame (40 ms)
 
 # Octave & Subharmonic Bounds
 SUBHARMONIC_P75_THRESHOLD: float = 64.0  # 75th percentile pitch for high voice

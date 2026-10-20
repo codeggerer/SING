@@ -7,10 +7,12 @@ from typing import List, Dict, Any, Optional, Set
 import numpy as np
 
 from karaoke.pitch import get_syllable_pitch, detect_melisma_pitches, snap_pitch_to_scale
-from karaoke.lyrics_io import split_syllables
 from karaoke.config import (
-    BEAT_DUR_SEC, PAUSE_BEAT_THRESHOLD_SEC, MIN_WORD_DUR_CLAMP,
-    SUBHARMONIC_P75_THRESHOLD, SUBHARMONIC_NOTE_THRESHOLD
+    BEAT_DUR_SEC,
+    PAUSE_BREAK_THRESHOLD_SEC,
+    LINE_MAX_WORDS,
+    SUBHARMONIC_P75_THRESHOLD,
+    SUBHARMONIC_NOTE_THRESHOLD,
 )
 
 
@@ -25,22 +27,36 @@ def build_word_notes(
     lang: str = "de",
 ) -> List[Dict[str, Any]]:
     """
-    Pass 1: Extracts raw notes and pause beats for each word.
+    Pass 1: Extracts raw notes and pause beats for each word/syllable.
+    Respects:
+    - Provider syllables / aligned syllables
+    - Phrase line breaks from providers or silence >= 0.6s / 8 words (Task 6)
+    - Minimum duration 30ms (Task 4)
     """
     word_notes_list = []
     prev_pitch = 60
+    words_in_current_phrase = 0
 
     for i, w in enumerate(words):
-        w_start = w["start"]
-        w_end = max(w["end"], w_start + MIN_WORD_DUR_CLAMP)
+        w_start = float(w["start"])
+        # Remove arbitrary clamps (Task 4): minimum 30ms duration
+        w_end = max(float(w["end"]), w_start + 0.030)
         raw_word = w["word"]
         w_dur = w_end - w_start
 
+        # Check line break conditions (Task 6)
         pause_beat = None
         if i > 0:
-            pause_sec = w_start - words[i-1]["end"]
-            if pause_sec > PAUSE_BEAT_THRESHOLD_SEC:
-                pause_beat = sec_to_beat(words[i-1]["end"] + 0.15)
+            prev_end = float(words[i-1]["end"])
+            pause_sec = w_start - prev_end
+            has_line_break_marker = bool(words[i-1].get("line_break_after", False))
+
+            if has_line_break_marker or pause_sec >= PAUSE_BREAK_THRESHOLD_SEC or words_in_current_phrase >= LINE_MAX_WORDS:
+                pause_sec_mid = prev_end + min(0.15, max(0.02, pause_sec / 2.0)) if pause_sec > 0.04 else prev_end + 0.01
+                pause_beat = sec_to_beat(pause_sec_mid)
+                words_in_current_phrase = 0
+
+        words_in_current_phrase += 1
 
         is_already_syllable = w.get("is_syllable", False)
         if is_already_syllable:
@@ -50,29 +66,34 @@ def build_word_notes(
             word_notes_list.append({"pause_beat": pause_beat, "notes": raw_notes, "num_sylls": 1})
             continue
 
-        syllables = split_syllables(raw_word, lang=lang, word_duration=w_dur)
-        num_sylls = len(syllables)
+        # Derived syllables via Task 2 vowel nucleus distribution
+        from karaoke.align import distribute_word_syllables
+        syll_dicts = distribute_word_syllables(
+            raw_word,
+            w_start,
+            w_end,
+            lang=lang,
+            is_last_in_phrase=(words_in_current_phrase >= LINE_MAX_WORDS),
+        )
+        num_sylls = len(syll_dicts)
         raw_notes = []
 
         if num_sylls == 1:
             melisma = detect_melisma_pitches(pitch_data, w_start, w_end)
             if melisma:
                 (t0, t1, p1), (t2, t3, p2) = melisma[0], melisma[1]
-                raw_notes.append({"start": t0, "end": t1, "pitch": p1, "text": f"{syllables[0]}-"})
+                raw_notes.append({"start": t0, "end": t1, "pitch": p1, "text": f"{syll_dicts[0]['word'].strip()}-"})
                 raw_notes.append({"start": t2, "end": t3, "pitch": p2, "text": "~ "})
             else:
                 p = get_syllable_pitch(pitch_data, w_start, w_end, fallback_pitch=prev_pitch)
-                raw_notes.append({"start": w_start, "end": w_end, "pitch": p, "text": f"{syllables[0]} "})
+                raw_notes.append({"start": w_start, "end": w_end, "pitch": p, "text": syll_dicts[0]["word"]})
         else:
-            dur_per_syl = w_dur / num_sylls
-            for s_idx, syl in enumerate(syllables):
-                s_start = w_start + (s_idx * dur_per_syl)
-                s_end = s_start + dur_per_syl
-                s_pitch = get_syllable_pitch(pitch_data, s_start, s_end, fallback_pitch=prev_pitch)
+            for s_idx, s_info in enumerate(syll_dicts):
+                s_s = s_info["start"]
+                s_e = s_info["end"]
+                s_pitch = get_syllable_pitch(pitch_data, s_s, s_e, fallback_pitch=prev_pitch)
                 prev_pitch = s_pitch
-                is_last = (s_idx == num_sylls - 1)
-                text_part = f"{syl} " if is_last else f"{syl}-"
-                raw_notes.append({"start": s_start, "end": s_end, "pitch": s_pitch, "text": text_part})
+                raw_notes.append({"start": s_s, "end": s_e, "pitch": s_pitch, "text": s_info["word"]})
 
         word_notes_list.append({"pause_beat": pause_beat, "notes": raw_notes, "num_sylls": num_sylls})
 

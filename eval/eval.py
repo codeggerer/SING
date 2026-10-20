@@ -101,16 +101,18 @@ def run_pipeline_on_song(
             key_info=key_info,
         )
     elif lyrics_json_path and lyrics_json_path.exists():
-        # Phase 2: Canonical lyrics doc
-        doc = LyricsDoc.from_json(lyrics_json_path)
-        if abs(doc.lyricsOffsetSec) < 1e-4:
-            from lyrics_providers import estimate_audio_offset
-            offset = estimate_audio_offset(vocals_file, doc, max_lag_sec=30.0)
-            if abs(offset) > 0.04:
-                print(f"  ⏱️ Korrigiere Lyrics-Audio-Offset: {offset:+.3f}s")
-                doc.lyricsOffsetSec = offset
-        words = doc.to_words_list()
-        lang = (doc.language or "en").lower()[:2]
+        # Phase 2 & 4: Canonical lyrics doc with MMS forced alignment & audio snapping
+        from karaoke.lyrics_io import load_canonical_lyrics
+        res = load_canonical_lyrics(
+            lyrics_json_path,
+            vocals_file,
+            pitch_data=pitch_data,
+        )
+        if res is not None:
+            words, lang = res
+        else:
+            words, lang = gk.transcribe_lyrics(vocals_file, pitch_data=pitch_data)
+
         gk.generate_ultrastar_chart(
             words,
             pitch_data,
@@ -122,8 +124,8 @@ def run_pipeline_on_song(
             key_info=key_info,
         )
     else:
-        # Full fallback: Whisper transcription + alignment + pitch
-        words, detected_lang = gk.transcribe_lyrics(vocals_file)
+        # Full fallback: Whisper transcription + Phase 4 MMS forced alignment
+        words, detected_lang = gk.transcribe_lyrics(vocals_file, pitch_data=pitch_data)
         gk.generate_ultrastar_chart(
             words,
             pitch_data,

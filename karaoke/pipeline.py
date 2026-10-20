@@ -100,32 +100,9 @@ def run(
     # Step 2: Display BPM (fast)
     display_bpm = detect_display_bpm(str(audio_path))
 
-    # Step 3: Lyrics & Timestamps (weight: 0.40 -> 0.60)
-    def lyrics_progress(s, sub_frac, m):
-        report("lyrics", 0.40 + 0.20 * sub_frac, m)
-
-    words = []
-    detected_lang = "en"
-    lyrics_source = "whisper"
-
-    if job.lyrics_json and Path(job.lyrics_json).exists():
-        res = load_canonical_lyrics(job.lyrics_json, vocals_file, progress_cb=lyrics_progress)
-        if res is not None:
-            words, detected_lang = res
-            lyrics_source = "canonical"
-
-    if not words:
-        words, detected_lang = transcribe_lyrics(
-            vocals_file,
-            hardware_profile=hw,
-            model_selection=models,
-            stage_cache=stage_cache,
-            progress_cb=lyrics_progress,
-        )
-
-    # Step 4: Key Detection & Pitch Analysis (weight: 0.60 -> 0.85)
+    # Step 3: Key Detection & Pitch Analysis (weight: 0.40 -> 0.65)
     def pitch_progress(s, sub_frac, m):
-        report("pitch", 0.60 + 0.25 * sub_frac, m)
+        report("pitch", 0.40 + 0.25 * sub_frac, m)
 
     key_info = detect_song_key(
         instrumental_file if instrumental_file.exists() else audio_path,
@@ -143,6 +120,36 @@ def run(
         stage_cache=stage_cache,
         progress_cb=pitch_progress,
     )
+
+    # Step 4: Lyrics & Forced Alignment (weight: 0.65 -> 0.85)
+    def lyrics_progress(s, sub_frac, m):
+        report("lyrics", 0.65 + 0.20 * sub_frac, m)
+
+    words = []
+    detected_lang = "en"
+    lyrics_source = "whisper"
+
+    if job.lyrics_json and Path(job.lyrics_json).exists():
+        res = load_canonical_lyrics(
+            job.lyrics_json,
+            vocals_file,
+            pitch_data=pitch_data,
+            hardware_profile=hw,
+            progress_cb=lyrics_progress,
+        )
+        if res is not None:
+            words, detected_lang = res
+            lyrics_source = "canonical"
+
+    if not words:
+        words, detected_lang = transcribe_lyrics(
+            vocals_file,
+            pitch_data=pitch_data,
+            hardware_profile=hw,
+            model_selection=models,
+            stage_cache=stage_cache,
+            progress_cb=lyrics_progress,
+        )
 
     # Step 5: UltraStar Chart Generation & Playback Assembly (weight: 0.85 -> 0.98)
     report("chart", 0.88, "Building UltraStar chart file...")

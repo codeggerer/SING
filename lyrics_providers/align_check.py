@@ -49,10 +49,10 @@ def compute_cer(reference: str, hypothesis: str) -> float:
     return dp[n][m] / max(1, n)
 
 
-def estimate_audio_offset(vocal_path: Path, doc: LyricsDoc, max_lag_sec: float = 3.0) -> float:
+def estimate_audio_offset(vocal_path: Path, doc: LyricsDoc, max_lag_sec: float = 30.0) -> float:
     """
     Estimates global timing offset by cross-correlating lyrics onsets
-    with vocal audio RMS energy envelope.
+    with vocal audio onset strength envelope.
     Returns offset in seconds to add to lyricsDoc (doc.start + offset).
     """
     try:
@@ -63,8 +63,12 @@ def estimate_audio_offset(vocal_path: Path, doc: LyricsDoc, max_lag_sec: float =
     try:
         y, sr = librosa.load(str(vocal_path), sr=16000, mono=True)
         hop_length = int(0.020 * sr)  # 20ms frames
-        rms = librosa.feature.rms(y=y, frame_length=hop_length * 2, hop_length=hop_length)[0]
-        num_frames = len(rms)
+        try:
+            audio_env = librosa.onset.onset_strength(y=y, sr=sr, hop_length=hop_length)
+        except Exception:
+            audio_env = librosa.feature.rms(y=y, frame_length=hop_length * 2, hop_length=hop_length)[0]
+
+        num_frames = len(audio_env)
         total_dur = num_frames * 0.020
 
         # Build lyrics onset impulse train
@@ -86,15 +90,16 @@ def estimate_audio_offset(vocal_path: Path, doc: LyricsDoc, max_lag_sec: float =
         lyrics_signal = np.convolve(lyrics_signal, window, mode="same")
 
         # Normalize signals
-        rms_norm = (rms - np.mean(rms)) / (np.std(rms) + 1e-8)
+        env_norm = (audio_env - np.mean(audio_env)) / (np.std(audio_env) + 1e-8)
         lyr_norm = (lyrics_signal - np.mean(lyrics_signal)) / (np.std(lyrics_signal) + 1e-8)
 
-        # Cross-correlate within [-max_lag_sec, +max_lag_sec]
+        # Cross-correlate within [-min_lag, +max_lag_sec]
+        min_lag_frames = int(-5.0 / 0.020)
         max_lag_frames = int(max_lag_sec / 0.020)
-        corr = np.correlate(rms_norm, lyr_norm, mode="full")
+        corr = np.correlate(env_norm, lyr_norm, mode="full")
         zero_lag = len(lyr_norm) - 1
 
-        valid_start = max(0, zero_lag - max_lag_frames)
+        valid_start = max(0, zero_lag + min_lag_frames)
         valid_end = min(len(corr), zero_lag + max_lag_frames + 1)
         sub_corr = corr[valid_start:valid_end]
 
@@ -102,9 +107,9 @@ def estimate_audio_offset(vocal_path: Path, doc: LyricsDoc, max_lag_sec: float =
         best_lag_frames = (valid_start + best_idx) - zero_lag
         best_lag_sec = best_lag_frames * 0.020
 
-        # Compensate for vowel nucleus energy delay relative to consonant onset (~220ms)
-        if best_lag_sec > 0.3:
-            best_lag_sec = max(0.0, best_lag_sec - 0.22)
+        # Compensate for acoustic onset energy centroid delay relative to attack (~140ms)
+        if best_lag_sec > 0.2:
+            best_lag_sec = max(0.0, best_lag_sec - 0.14)
 
         return float(round(best_lag_sec, 3))
     except Exception as e:
