@@ -25,8 +25,11 @@ Thumbs.db
 
 # Private Credentials & Session Data
 usdb_config.json
+config.local.json
+*.local.json
 .env
 .env.*
+!.env.example
 *.pem
 *.key
 secrets/
