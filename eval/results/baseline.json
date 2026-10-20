@@ -1,0 +1,341 @@
+{
+  "timestamp": "2026-10-20T20:40:42.239491",
+  "git_sha": "dd16c8ee",
+  "stage": "all",
+  "pitch_engine": "pyin",
+  "inject_truth_lyrics": false,
+  "summary": {
+    "mean_pitch_strict_0": 0.0063,
+    "mean_pitch_strict_1": 0.0092,
+    "mean_pitch_octave_1": 0.529,
+    "median_onset_error_ms": 194.7,
+    "median_onset_error_p90_ms": 2793.9,
+    "median_duration_error": 0.6505,
+    "mean_lyrics_wer": 0.5981,
+    "mean_lyrics_cer": 0.262,
+    "mean_false_split_rate": 0.0294,
+    "total_songs": 16
+  },
+  "songs": {
+    "2raumwohnung-36-grad": {
+      "title": "36 Grad",
+      "artist": "2raumwohnung",
+      "metrics": {
+        "pitch_strict_0": 0.0,
+        "pitch_strict_1": 0.0,
+        "pitch_octave_0": 0.5762,
+        "pitch_octave_1": 0.744,
+        "onset_error_median_ms": 124.55,
+        "onset_error_p90_ms": 1724.8,
+        "duration_error_median": 0.496,
+        "lyrics_wer": 0.8495,
+        "lyrics_cer": 0.2936,
+        "false_split_rate": 0.0348,
+        "truth_note_count": 488,
+        "gen_note_count": 393,
+        "total_overlap_sec": 75.39
+      },
+      "runtime_sec": 0.0
+    },
+    "adele-rolling-in-the-deep": {
+      "title": "Rolling In The Deep",
+      "artist": "Adele",
+      "metrics": {
+        "pitch_strict_0": 0.0,
+        "pitch_strict_1": 0.0,
+        "pitch_octave_0": 0.555,
+        "pitch_octave_1": 0.634,
+        "onset_error_median_ms": 498.6,
+        "onset_error_p90_ms": 15842.9,
+        "duration_error_median": 0.8199,
+        "lyrics_wer": 0.7014,
+        "lyrics_cer": 0.4395,
+        "false_split_rate": 0.0572,
+        "truth_note_count": 507,
+        "gen_note_count": 304,
+        "total_overlap_sec": 51.47
+      },
+      "runtime_sec": 54.6
+    },
+    "apache-207-roller": {
+      "title": "Roller",
+      "artist": "Apache 207",
+      "metrics": {
+        "pitch_strict_0": 0.0,
+        "pitch_strict_1": 0.0,
+        "pitch_octave_0": 0.3625,
+        "pitch_octave_1": 0.4979,
+        "onset_error_median_ms": 123.7,
+        "onset_error_p90_ms": 16162.9,
+        "duration_error_median": 0.6505,
+        "lyrics_wer": 0.8807,
+        "lyrics_cer": 0.432,
+        "false_split_rate": 0.03,
+        "truth_note_count": 466,
+        "gen_note_count": 357,
+        "total_overlap_sec": 36.58
+      },
+      "runtime_sec": 51.7
+    },
+    "billie-eilish-bad-guy": {
+      "title": "Bad Guy",
+      "artist": "Billie Eilish",
+      "metrics": {
+        "pitch_strict_0": 0.0,
+        "pitch_strict_1": 0.0,
+        "pitch_octave_0": 0.0752,
+        "pitch_octave_1": 0.4945,
+        "onset_error_median_ms": 152.35,
+        "onset_error_p90_ms": 4206.4,
+        "duration_error_median": 0.8002,
+        "lyrics_wer": 0.785,
+        "lyrics_cer": 0.427,
+        "false_split_rate": 0.0329,
+        "truth_note_count": 304,
+        "gen_note_count": 229,
+        "total_overlap_sec": 21.18
+      },
+      "runtime_sec": 53.7
+    },
+    "cro-easy": {
+      "title": "Easy",
+      "artist": "Cro",
+      "metrics": {
+        "pitch_strict_0": 0.0,
+        "pitch_strict_1": 0.0,
+        "pitch_octave_0": 0.3463,
+        "pitch_octave_1": 0.4108,
+        "onset_error_median_ms": 318.7,
+        "onset_error_p90_ms": 24226.1,
+        "duration_error_median": 0.374,
+        "lyrics_wer": 0.5829,
+        "lyrics_cer": 0.4431,
+        "false_split_rate": 0.0089,
+        "truth_note_count": 447,
+        "gen_note_count": 253,
+        "total_overlap_sec": 40.08
+      },
+      "runtime_sec": 68.8
+    },
+    "die-arzte-schrei-nach-liebe": {
+      "title": "Schrei nach Liebe",
+      "artist": "Die Ärzte",
+      "metrics": {
+        "pitch_strict_0": 0.0,
+        "pitch_strict_1": 0.0,
+        "pitch_octave_0": 0.3849,
+        "pitch_octave_1": 0.5285,
+        "onset_error_median_ms": 208.6,
+        "onset_error_p90_ms": 425.7,
+        "duration_error_median": 0.554,
+        "lyrics_wer": 0.1805,
+        "lyrics_cer": 0.0618,
+        "false_split_rate": 0.0206,
+        "truth_note_count": 340,
+        "gen_note_count": 324,
+        "total_overlap_sec": 63.08
+      },
+      "runtime_sec": 63.0
+    },
+    "dua-lipa-dont-start-now": {
+      "title": "Don't Start Now",
+      "artist": "Dua Lipa",
+      "metrics": {
+        "pitch_strict_0": 0.0,
+        "pitch_strict_1": 0.0,
+        "pitch_octave_0": 0.8032,
+        "pitch_octave_1": 0.8295,
+        "onset_error_median_ms": 222.3,
+        "onset_error_p90_ms": 2793.9,
+        "duration_error_median": 0.9846,
+        "lyrics_wer": 0.7526,
+        "lyrics_cer": 0.2646,
+        "false_split_rate": 0.0485,
+        "truth_note_count": 371,
+        "gen_note_count": 293,
+        "total_overlap_sec": 56.56
+      },
+      "runtime_sec": 52.0
+    },
+    "ed-sheeran-perfect": {
+      "title": "Perfect",
+      "artist": "Ed Sheeran",
+      "metrics": {
+        "pitch_strict_0": 0.0,
+        "pitch_strict_1": 0.0,
+        "pitch_octave_0": 0.5653,
+        "pitch_octave_1": 0.625,
+        "onset_error_median_ms": 152.0,
+        "onset_error_p90_ms": 801.5,
+        "duration_error_median": 2.4056,
+        "lyrics_wer": 0.5647,
+        "lyrics_cer": 0.1083,
+        "false_split_rate": 0.0231,
+        "truth_note_count": 563,
+        "gen_note_count": 406,
+        "total_overlap_sec": 89.86
+      },
+      "runtime_sec": 71.3
+    },
+    "eminem-without-me": {
+      "title": "Without Me",
+      "artist": "Eminem",
+      "metrics": {
+        "pitch_strict_0": 0.0,
+        "pitch_strict_1": 0.0,
+        "pitch_octave_0": 0.2969,
+        "pitch_octave_1": 0.515,
+        "onset_error_median_ms": 118.6,
+        "onset_error_p90_ms": 283.3,
+        "duration_error_median": 0.4948,
+        "lyrics_wer": 0.5516,
+        "lyrics_cer": 0.2069,
+        "false_split_rate": 0.0077,
+        "truth_note_count": 1043,
+        "gen_note_count": 914,
+        "total_overlap_sec": 24.65
+      },
+      "runtime_sec": 125.4
+    },
+    "namika-je-ne-parle-pas-francais": {
+      "title": "Je ne parle pas français",
+      "artist": "Namika",
+      "metrics": {
+        "pitch_strict_0": 0.0,
+        "pitch_strict_1": 0.0,
+        "pitch_octave_0": 0.195,
+        "pitch_octave_1": 0.3513,
+        "onset_error_median_ms": 263.5,
+        "onset_error_p90_ms": 429.4,
+        "duration_error_median": 0.6995,
+        "lyrics_wer": 0.2527,
+        "lyrics_cer": 0.1215,
+        "false_split_rate": 0.0543,
+        "truth_note_count": 497,
+        "gen_note_count": 477,
+        "total_overlap_sec": 62.45
+      },
+      "runtime_sec": 57.2
+    },
+    "nina-chuba-wildberry-lillet": {
+      "title": "Wildberry Lillet",
+      "artist": "Nina Chuba",
+      "metrics": {
+        "pitch_strict_0": 0.0,
+        "pitch_strict_1": 0.0,
+        "pitch_octave_0": 0.4117,
+        "pitch_octave_1": 0.4797,
+        "onset_error_median_ms": 285.7,
+        "onset_error_p90_ms": 18065.7,
+        "duration_error_median": 0.5869,
+        "lyrics_wer": 0.4888,
+        "lyrics_cer": 0.3347,
+        "false_split_rate": 0.0224,
+        "truth_note_count": 536,
+        "gen_note_count": 403,
+        "total_overlap_sec": 33.09
+      },
+      "runtime_sec": 62.9
+    },
+    "oasis-wonderwall": {
+      "title": "Wonderwall",
+      "artist": "Oasis",
+      "metrics": {
+        "pitch_strict_0": 0.0,
+        "pitch_strict_1": 0.0,
+        "pitch_octave_0": 0.569,
+        "pitch_octave_1": 0.6201,
+        "onset_error_median_ms": 143.4,
+        "onset_error_p90_ms": 357.6,
+        "duration_error_median": 0.6241,
+        "lyrics_wer": 0.5857,
+        "lyrics_cer": 0.0725,
+        "false_split_rate": 0.0522,
+        "truth_note_count": 345,
+        "gen_note_count": 336,
+        "total_overlap_sec": 63.1
+      },
+      "runtime_sec": 72.4
+    },
+    "peter-fox-haus-am-see": {
+      "title": "Haus am See",
+      "artist": "Peter Fox",
+      "metrics": {
+        "pitch_strict_0": 0.0,
+        "pitch_strict_1": 0.0,
+        "pitch_octave_0": 0.4542,
+        "pitch_octave_1": 0.5029,
+        "onset_error_median_ms": 130.9,
+        "onset_error_p90_ms": 9470.0,
+        "duration_error_median": 0.7327,
+        "lyrics_wer": 0.3428,
+        "lyrics_cer": 0.24,
+        "false_split_rate": 0.024,
+        "truth_note_count": 499,
+        "gen_note_count": 412,
+        "total_overlap_sec": 48.65
+      },
+      "runtime_sec": 63.3
+    },
+    "queen-dont-stop-me-now": {
+      "title": "Don't Stop Me Now",
+      "artist": "Queen",
+      "metrics": {
+        "pitch_strict_0": 0.1014,
+        "pitch_strict_1": 0.147,
+        "pitch_octave_0": 0.1562,
+        "pitch_octave_1": 0.2351,
+        "onset_error_median_ms": 1953.3,
+        "onset_error_p90_ms": 2235.0,
+        "duration_error_median": 0.4853,
+        "lyrics_wer": 0.7925,
+        "lyrics_cer": 0.2963,
+        "false_split_rate": 0.0239,
+        "truth_note_count": 502,
+        "gen_note_count": 373,
+        "total_overlap_sec": 94.32
+      },
+      "runtime_sec": 58.6
+    },
+    "sia-chandelier": {
+      "title": "Chandelier",
+      "artist": "Sia",
+      "metrics": {
+        "pitch_strict_0": 0.0,
+        "pitch_strict_1": 0.0,
+        "pitch_octave_0": 0.5697,
+        "pitch_octave_1": 0.5944,
+        "onset_error_median_ms": 194.7,
+        "onset_error_p90_ms": 12523.8,
+        "duration_error_median": 0.7391,
+        "lyrics_wer": 0.7046,
+        "lyrics_cer": 0.3562,
+        "false_split_rate": 0.0105,
+        "truth_note_count": 570,
+        "gen_note_count": 332,
+        "total_overlap_sec": 47.87
+      },
+      "runtime_sec": 86.7
+    },
+    "sido-bilder-im-kopf": {
+      "title": "Bilder im Kopf",
+      "artist": "Sido",
+      "metrics": {
+        "pitch_strict_0": 0.0,
+        "pitch_strict_1": 0.0,
+        "pitch_octave_0": 0.3447,
+        "pitch_octave_1": 0.4009,
+        "onset_error_median_ms": 56.7,
+        "onset_error_p90_ms": 140.0,
+        "duration_error_median": 0.5202,
+        "lyrics_wer": 0.5535,
+        "lyrics_cer": 0.0934,
+        "false_split_rate": 0.0195,
+        "truth_note_count": 972,
+        "gen_note_count": 932,
+        "total_overlap_sec": 33.95
+      },
+      "runtime_sec": 91.1
+    }
+  }
+}

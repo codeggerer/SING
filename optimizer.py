@@ -1,17 +1,13 @@
 #!/usr/bin/env python3
 """
-Deep Multi-Island Genetic Optimizer for AI Karaoke Generator
-Version 2.0 (Massive Scale Evolutionary Search / Island Model)
+Deep Multi-Island Genetic Optimizer for AI Karaoke Generator (Legacy/Secondary).
 
-Features:
-- Island Model Architecture: 8 independent parallel sub-populations preventing stagnation.
-- Migration: Top individuals migrate between islands every N generations.
-- Cataclysm / Anti-Stagnation: Extinction & hyper-mutation restarts stagnant islands.
-- Fuzzy Syllable Sequence Alignment: Matches generated syllables to ground truth by text,
-  preventing off-by-one index shifts from destroying fitness scores.
-- Massive Parameter Exploration: 12 continuous and discrete acoustic genes.
-- Live Dashboard with generation stats, island diversity, and auto-saving high scores.
-- Graceful exit (Ctrl+C preserves best results and exports winning UltraStar chart).
+NOTE (PLAN.md Phase 1):
+The primary benchmark and evaluation route has been migrated to `eval/eval.py`,
+measuring strict & octave-agnostic pitch accuracy, onset DTW timing error,
+WER/CER, and false split rates across a diverse multi-song ground-truth corpus.
+This script remains runnable for experimental GA exploration, but its output
+(best_karaoke_params.json) is no longer authoritative for the generation pipeline.
 """
 
 import os

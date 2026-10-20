@@ -799,19 +799,6 @@ def main():
     clean_filename = f"{artist} - {title}".replace("/", "_").replace("\\", "_")
     output_txt = output_dir / f"{clean_filename}.txt"
 
-    # Load evolved parameters if present from genetic optimization
-    evolved_json = output_dir / "best_karaoke_params.json"
-    if evolved_json.exists():
-        try:
-            with open(evolved_json, "r", encoding="utf-8") as f:
-                evo_data = json.load(f)
-                evo_p = evo_data.get("parameters", {})
-                print(f"🧬 Lade evolutionär gezüchtete Parameter (Score: {evo_data.get('fitness', 0):.0f}, Treffer: {evo_data.get('accuracy_pct', 0):.1f}%)...")
-        except Exception:
-            evo_p = {}
-    else:
-        evo_p = {}
-
     generate_ultrastar_chart(words, pitch_data, display_bpm, title, artist, output_txt, lang=detected_lang, key_info=key_info)
 
     final_instrumental = output_dir / f"{clean_filename} [Instrumental].wav"

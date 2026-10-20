@@ -37,6 +37,11 @@ secrets/
 # Generated Pipeline Outputs & Temporary Files
 output/
 usdb_cache/
+eval/corpus/*/*.txt
+eval/corpus/*/*.mp3
+eval/corpus/*/*.wav
+eval/results/*.json
+!eval/results/baseline.json
 *.npz
 *.npy
 unsicher_ground_truth.json
