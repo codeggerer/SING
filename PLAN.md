@@ -91,10 +91,22 @@ Key principle: **lyrics providers supply text and timing. The audio supplies pit
 1. **Spicy Lyrics** (`https://api.spicylyrics.org`, endpoint `GET /v1/lyrics/{spotifyTrackId}`, `Authorization: Bearer <key>`).
    - Read the official docs yourself before coding: `https://developers.spicylyrics.org/llms.txt` (**it could not be fetched while this plan was written, so the response schema below is unverified**). Save a real response sample under `tests/fixtures/spicylyrics_*.json` and write the parser against that sample.
    - Per the public summary, `syncType` is one of `Syllable`, `Line`, `Static`. The best available sync is returned. Syllable data is nested in lines with start/end times. Lead and background voices are probably distinguished. Verify all of this against the sample.
-   - Keys: `sl_sk_…` (server-side) and `sl_pk_…` (browser, origin-restricted). Use a **server-side key only** and call from `server.js`. Never ship the key to the browser. Read it from env `SPICY_LYRICS_KEY` or the git-ignored `config.local.json`. Add it to `.gitignore`.
+   - Keys: `sl_sk_…` (server-side) and `sl_pk_…` (browser, origin-restricted). **Each user who runs the project supplies their own key** (decided with the project owner). Use a server-side key and call from `server.js`. Never ship the key to the browser.
+     - Key sources, in priority order: env `SPICY_LYRICS_KEY`, then the git-ignored `config.local.json`. Add a Settings field in the UI that `POST`s the key to `/api/settings/spicy-key`. The server writes it to `config.local.json` (file mode `0600`) and never returns it. `GET /api/lyrics/status` returns only `{ spicyConfigured: bool }`. Add `config.local.json` to `.gitignore`.
+     - No key configured → skip this provider silently and continue the chain (never an error for the user).
+   - **Rate limits are unknown and not in the docs.** Handle them defensively:
+     - Honor `Retry-After` and `X-RateLimit-*` headers on 429. Log all `X-RateLimit-*`/`RateLimit-*` response headers once at debug level so limits can be discovered empirically and written to `docs/decisions.md`.
+     - Global token bucket in `lib/lyrics.js`, default 1 request/s and 30/min (constants, overridable via config). Never call the API twice for the same track (cache hit first, negative cache too).
+     - On repeated 401/403, mark the key invalid in `/api/lyrics/status` (`spicyKeyValid: false`) so the UI can prompt for a new one.
    - Needs a **Spotify track ID**. The Resolver (Phase 6.1) must therefore resolve one (Spotify link, or searching by artist, title and duration).
 2. **Spotify color-lyrics** (fallback). `GET https://spclient.wg.spotify.com/color-lyrics/v2/track/{id}?format=json&vocalRemoval=false&market=from_token` with headers `app-platform: WebPlayer` and `authorization: Bearer <user-session web-player token>`.
-   - Client-credentials tokens do not work. A user-session web-player token is required. The existing PKCE flow in `public/app.js` yields a token that probably lacks the scope or is rejected, so **test this early**. If it fails, offer an optional `SPOTIFY_SP_DC` cookie setting that exchanges for a web-player token. Document the trade-off in the UI.
+   - Client-credentials tokens do not work. A user-session token is required.
+   - **Token strategy (decided with the project owner): try the existing PKCE token first, `sp_dc` is the fallback.**
+     1. **Step 2.2-A, probe script first (do this before building anything else for this provider):** `scripts/probe_color_lyrics.js` takes a track ID and calls the endpoint with (a) the PKCE access token (`state.spotifyAccessToken`, pasted or read from a file), then (b) an `sp_dc`-derived web-player token. It prints status codes and the response `syncType`, and writes the findings to `docs/decisions.md`.
+     2. Expectation: the PKCE token is issued for *our own* Spotify app `client_id`. `spclient.wg.spotify.com` is an internal endpoint that is, as far as is known, only reliably served for tokens minted by the official web player. So a 401/403 with the PKCE token is likely. **This is unverified, so the probe decides.** If PKCE works, use it as the only path and do not require `sp_dc`. If it fails, `sp_dc` becomes the supported path.
+     3. Implementation: `getSpotifyLyricsToken()` tries, in order: PKCE token (forwarded from the browser to the server via `POST /api/spotify/token`, kept in memory only), then the `sp_dc` path. Cache the successful method in memory and re-probe after a 401.
+     4. `sp_dc` path: the user pastes the `sp_dc` cookie in Settings. The server stores it in `config.local.json` (same rules as the Spicy key) and exchanges it for a web-player access token (`open.spotify.com/get_access_token?reason=transport&productType=web_player` with `Cookie: sp_dc=…`; this endpoint has changed over time and may require a TOTP-style parameter, so verify its current behavior in the probe). Cache the token until its expiry. Show a clear warning in the UI that the cookie grants account access and is stored locally only.
+     5. `GET /api/lyrics/status` also returns `{ spotifyLyricsMethod: "pkce" | "sp_dc" | null }`.
    - Expect mostly `LINE_SYNCED`. Use `syllables[]` only if non-empty. `startTimeMs` and `endTimeMs` are strings (convert with `Number`). An `endTimeMs` of `"0"` means "unknown": derive the end from the next line's start.
    - This is an unofficial endpoint. Wrap it in a feature flag (`ENABLE_SPOTIFY_COLOR_LYRICS`, default on only when a token is configured) and handle 401, 403 and 429 gracefully (skip to the next provider).
 3. **LRCLIB** (already used in `server.js`). Use the `syncedLyrics` LRC (line sync). Match on artist, title and duration (±3 s) via `/api/get`, then `/api/search` as fallback.
@@ -125,7 +137,36 @@ Key principle: **lyrics providers supply text and timing. The audio supplies pit
 3. Stage cache keyed by `sha1(audio)` + stage parameters: `output/<hash>/{vocals.wav,no_vocals.wav,f0.npz,words.json,...}`.
 4. `pipeline.run(job)` takes a `progress(stage, fraction, message)` callback. The CLI prints it. The server (Phase 6) relays it.
 5. Machine-readable mode: `--json-progress` prints one JSON line per progress event to stdout, and the final result paths in the last line.
-6. Add `torch.device` selection helper (MPS → CUDA → CPU).
+6. Add `karaoke/hardware.py` (see "Hardware profile" below) and use it everywhere a device or model size is chosen. No stage may hardcode `"cpu"`, `"mps"` or a model name.
+
+### Hardware profile (dynamic model selection)
+
+Primary dev target: Apple M4 (use it fully). Fallbacks: NVIDIA CUDA, then CPU.
+
+`detect_hardware() -> HardwareProfile` returns `{ backend, device, vram_or_ram_gb, cpu_cores, notes }`:
+- `backend = "mps"` when `torch.backends.mps.is_available()` (Apple Silicon).
+- `backend = "cuda"` when `torch.cuda.is_available()`. This covers NVIDIA. AMD GPUs only appear here when torch is the ROCm build (ROCm reuses the `cuda` device name on Linux), so no separate AMD code path is needed. On other AMD setups (Windows), they fall through to CPU. Document this.
+- otherwise `backend = "cpu"`.
+- Memory: `torch.cuda.get_device_properties(0).total_memory` for CUDA. For MPS and CPU use total system RAM (`os.sysconf` / `psutil` if installed, else `sysctl hw.memsize` on macOS).
+- Overrides: env `KARAOKE_DEVICE=cpu|mps|cuda` and CLI `--device`, for testing and for broken GPU drivers.
+
+**Important compatibility facts (verify with a smoke test in this phase, do not assume):**
+- `faster-whisper` uses CTranslate2, which supports CPU and CUDA but **not MPS**. On an M4 it runs on CPU (int8, many threads), which is acceptable but not GPU-accelerated. For real Apple GPU speed, add an optional `mlx-whisper` backend (`mlx-community/whisper-large-v3-turbo`) selected automatically when `backend == "mps"` and `mlx_whisper` imports. Keep the faster-whisper path for CUDA and CPU. Wrap both behind one `transcribe(path, language, model_size)` interface.
+- Demucs and `audio-separator` (ONNX/torch) work on MPS and CUDA. Test MPS correctness (some torch ops silently fall back, so set `PYTORCH_ENABLE_MPS_FALLBACK=1`).
+- `torchcrepe` works on MPS and CUDA. RMVPE/FCPE: verify MPS support, and fall back to CPU for that stage alone if an op is unsupported.
+- Basic Pitch (optional): use the ONNX or CoreML runtime on macOS, CPU/ONNX elsewhere.
+
+**Selection table (defaults, overridable via config and CLI `--quality {fast,balanced,best}`):**
+
+| Setting | mps (M4, ≥16 GB) | cuda ≥ 10 GB | cuda < 10 GB | cpu |
+|---|---|---|---|---|
+| Whisper backend | mlx-whisper if available, else faster-whisper CPU | faster-whisper CUDA fp16 | faster-whisper CUDA int8_float16 | faster-whisper CPU int8 |
+| Whisper model | `large-v3-turbo` | `large-v3` | `large-v3-turbo` | `small` (`medium` if ≥ 16 GB RAM and `--quality best`) |
+| Separator | roformer / htdemucs, GPU | roformer, GPU | htdemucs, GPU, `--segment` reduced | htdemucs, `--segment 7` |
+| f0 tracker | RMVPE (or CREPE full) on MPS | RMVPE on CUDA | CREPE full | FCPE or pYIN |
+| Forced aligner | wav2vec2/MMS on MPS | CUDA | CUDA | CPU |
+
+Rules: `--quality fast` always drops one model tier. If total memory is below the threshold, drop a tier before starting (do not wait for an OOM). If a stage raises an out-of-memory or unsupported-op error, retry that stage once on the next lower tier or device, log it, and record the final choice in `meta.json` (`hardware`, `models_used`). Add tests for the selection function with mocked profiles.
 
 **Done when:** CLI behavior is unchanged, eval baseline reproduced, and the stages are importable separately.
 
@@ -269,7 +310,11 @@ Input: `{ "input": "<url or search text>" }`. Output: `{ title, artist, duration
 
 ## Open items to confirm with the project owner
 
-1. Spicy Lyrics API key: who owns it and what are the rate limits? (Needed before Phase 2 can be tested end to end.)
-2. Is a Spotify web-player token (`sp_dc` cookie) acceptable as an optional setting for the color-lyrics fallback?
-3. Hardware target for the pipeline: Apple MPS or CPU only? (Decides `large-v3` vs `large-v3-turbo` and RMVPE vs FCPE as default.)
-4. Is `yt-dlp` allowed as a runtime dependency, or must audio come from user uploads only?
+Resolved:
+1. Spicy Lyrics key: supplied by each user who runs the project. Rate limits are unknown and undocumented, so Phase 2.2 handles them defensively and records the observed headers.
+2. Spotify color-lyrics: try the PKCE token first (verified by the probe script), `sp_dc` as the fallback.
+3. Hardware: Apple M4 is the primary target. The pipeline detects MPS, then CUDA, then CPU and chooses model sizes dynamically (see "Hardware profile" in Phase 3).
+4. `yt-dlp` is approved as a runtime dependency.
+
+Still open:
+- None blocking. Revisit once the probe script (Phase 2.2-A) and the Spicy sample response are available.
