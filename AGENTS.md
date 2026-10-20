@@ -21,7 +21,8 @@ This project consists of two tightly coupled environments:
 | [`public/index.html`](./public/index.html) | HTML5 | **Single-Page Application Shell**. UI for lobby/search, stage arena, HUD, settings modals, and custom `.txt` loader. |
 | [`public/style.css`](./public/style.css) | CSS3 | **Dark Glassmorphism UI**. Glowing neon accents, responsive arena grid, particle canvas styling. |
 | [`public/ultrastar_index.json`](./public/ultrastar_index.json) | JSON | **Pre-Indexed Catalog**. 6,682 curated songs with title, artist, YouTube video ID, BPM, and initial gap values. |
-| [`generate_karaoke.py`](./generate_karaoke.py) | Python 3.11 | **AI Karaoke Pipeline CLI**. 4-step pipeline: Demucs stems -> Faster-Whisper timestamps -> CREPE/pYIN pitch -> UltraStar TXT export. |
+| [`generate_karaoke.py`](./generate_karaoke.py) | Python 3.11 | **AI Karaoke Pipeline CLI**. Thin wrapper over `karaoke` package with `--json-progress`, `--quality`, `--device`, and stage caching. |
+| [`karaoke/`](./karaoke/) | Python 3.11 | **Modular AI Karaoke Engine**. Modular package: `separate.py`, `lyrics_io.py`, `align.py`, `pitch.py`, `notes.py`, `chart.py`, `pipeline.py`, `hardware.py`, `cache.py`, `config.py`. |
 | [`optimizer.py`](./optimizer.py) | Python 3.11 | **Multi-Island Genetic Optimizer**. 8-island GA tuning 12 acoustic parameters against ground-truth note charts. |
 | [`tests/engine_test.js`](./tests/engine_test.js) | Node.js | **Engine Test Suite**. Tests MPM pitch detection on synthetic tones, catalog validity, and lyric alignment math. |
 | [`tests/test_karaoke_pipeline.py`](./tests/test_karaoke_pipeline.py) | Python (unittest) | **AI Unit Tests**. Tests phonetic syllabification, monosyllable protection, and energy-weighted median extraction. |
@@ -85,14 +86,17 @@ node tests/engine_test.js
 
 ### Python AI Pipeline & Tests
 ```bash
-# Run Python Unit Tests
-./venv/bin/python -m unittest tests/test_karaoke_pipeline.py
+# Run All Python Unit Tests
+./venv/bin/python -m unittest discover tests
 
 # Generate UltraStar Chart from Audio (fast pYIN mode)
 ./venv/bin/python generate_karaoke.py "song.mp3" --artist "Artist" --title "Title" --pitch-engine pyin
 
 # Generate with Neural Pitch (TorchCREPE on GPU/MPS)
 ./venv/bin/python generate_karaoke.py "song.mp3" --artist "Artist" --title "Title" --pitch-engine crepe --crepe-model tiny
+
+# Generate with machine-readable progress streaming (for server / SSE relay)
+./venv/bin/python generate_karaoke.py "song.mp3" --artist "Artist" --title "Title" --json-progress
 
 # Run Genetic Parameter Optimization
 ./venv/bin/python optimizer.py "song.mp3" --ground-truth ground_truth_sample.json
