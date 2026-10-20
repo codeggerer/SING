@@ -20,13 +20,14 @@ This project consists of two tightly coupled environments:
 | [`lib/lyrics.js`](./lib/lyrics.js) | Node.js (CommonJS) | **Multi-Provider Lyrics Engine**. Normalizes canonical `LyricsDoc`, manages Spicy Lyrics, Spotify Color-Lyrics, LRCLIB fallback, token buckets, and rate limits. |
 | [`lib/resolver.js`](./lib/resolver.js) | Node.js (CommonJS) | **Track & URL Resolver**. Dispatches Spotify URLs, YouTube URLs, and free-text queries to canonical track metadata with duration matching and confidence scoring. |
 | [`lib/jobs.js`](./lib/jobs.js) | Node.js (CommonJS) | **Job Queue & Generation Worker**. Single-concurrency worker for GPU/RAM protection, persistent job states, Server-Sent Events (SSE) streaming, and process cancellation. |
-| [`lib/library.js`](./lib/library.js) | Node.js (CommonJS) | **Song Library & Streaming Engine**. Scans generated songs in `songs/<slug>/`, parses `meta.json`, and serves audio with HTTP 206 Range streaming support. |
-| [`public/app.js`](./public/app.js) | JavaScript (ES6+) | **Main Game Engine & Client DSP**. Implements Web Audio API MPM pitch detector, 60 FPS canvas highway, YouTube/Spotify players, local instrumental playback, in-browser AI generator UI, and scoring. |
-| [`public/index.html`](./public/index.html) | HTML5 | **Single-Page Application Shell**. UI for lobby/search, stage arena, HUD, settings modals, and custom `.txt` loader. |
-| [`public/style.css`](./public/style.css) | CSS3 | **Dark Glassmorphism UI**. Glowing neon accents, responsive arena grid, particle canvas styling. |
+| [`lib/library.js`](./lib/library.js) | Node.js (CommonJS) | **Song Library & Streaming Engine**. Scans generated songs in `songs/<slug>/`, parses `meta.json`, serves audio with HTTP 206 Range streaming support, and handles chart editing updates via `updateSongChart()` (`POST /api/library/:slug/chart`). |
+| [`public/app.js`](./public/app.js) | JavaScript (ES6+) | **Main Game Engine & Client DSP**. Implements Web Audio API MPM pitch detector, 60 FPS canvas highway with render-time spacing, YouTube/Spotify players, local instrumental playback, in-browser AI generator UI, interactive Chart Editor (`#modalChartEditor`), and scoring. |
+| [`public/index.html`](./public/index.html) | HTML5 | **Single-Page Application Shell**. UI for lobby/search, stage arena, HUD, settings modals, Chart Editor modal, and custom `.txt` loader. |
+| [`public/style.css`](./public/style.css) | CSS3 | **Dark Glassmorphism UI**. Glowing neon accents, responsive arena grid, particle canvas styling, and Chart Editor piano roll styles. |
 | [`public/ultrastar_index.json`](./public/ultrastar_index.json) | JSON | **Pre-Indexed Catalog**. 6,682 curated songs with title, artist, YouTube video ID, BPM, and initial gap values. |
-| [`generate_karaoke.py`](./generate_karaoke.py) | Python 3.11 | **AI Karaoke Pipeline CLI**. Thin wrapper over `karaoke` package with `--json-progress`, `--quality`, `--device`, and stage caching. |
-| [`karaoke/`](./karaoke/) | Python 3.11 | **Modular AI Karaoke Engine**. Modular package: `separate.py`, `lyrics_io.py`, `align.py`, `pitch.py`, `notes.py`, `chart.py`, `pipeline.py`, `hardware.py`, `cache.py`, `config.py`. |
+| [`generate_karaoke.py`](./generate_karaoke.py) | Python 3.11 | **AI Karaoke Pipeline CLI**. Thin wrapper over `karaoke` package with `--json-progress`, `--quality`, `--device`, `--debug-dir`, and stage caching. |
+| [`karaoke/`](./karaoke/) | Python 3.11 | **Modular AI Karaoke Engine**. Modular package: `separate.py`, `lyrics_io.py`, `align.py`, `pitch.py`, `notes.py`, `chart.py`, `pipeline.py`, `hardware.py`, `cache.py`, `debug_export.py`, `config.py`. |
+| [`scripts/check.sh`](./scripts/check.sh) | Bash | **Continuous Regression Gate**. Executes Node.js tests, Python unit tests, and AI benchmark evaluation on `fast/*` subset, failing if any accuracy metric regresses > 2%. |
 | [`optimizer.py`](./optimizer.py) | Python 3.11 | **Multi-Island Genetic Optimizer**. 8-island GA tuning 12 acoustic parameters against ground-truth note charts. |
 | [`tests/engine_test.js`](./tests/engine_test.js) | Node.js | **Engine Test Suite**. Tests MPM pitch detection on synthetic tones, catalog validity, and lyric alignment math. |
 | [`tests/test_karaoke_pipeline.py`](./tests/test_karaoke_pipeline.py) | Python (unittest) | **AI Unit Tests**. Tests phonetic syllabification, monosyllable protection, and energy-weighted median extraction. |
@@ -87,6 +88,10 @@ node server.js
 # Run Complete JavaScript Test Suite (Validates Resolver, Job Queue, Library, and Engine DSP)
 npm test
 
+# Run End-to-End Regression Gate (Node.js + Python + AI Benchmark fast/* subset)
+bash scripts/check.sh
+# or: npm run test:regression
+
 # Run Individual Test Suites
 npm run test:resolver
 npm run test:jobs
@@ -98,14 +103,20 @@ npm run test:engine
 # Run All Python Unit Tests
 ./venv/bin/python -m unittest discover tests
 
-# Generate UltraStar Chart from Audio (fast pYIN mode)
-./venv/bin/python generate_karaoke.py "song.mp3" --artist "Artist" --title "Title" --pitch-engine pyin
+# Generate UltraStar Chart from Audio (FCPE neural singing pitch)
+./venv/bin/python generate_karaoke.py "song.mp3" --artist "Artist" --title "Title" --pitch-engine fcpe
+
+# Generate with Debug Export (writes contour.png & report.json to ./debug_out)
+./venv/bin/python generate_karaoke.py "song.mp3" --artist "Artist" --title "Title" --debug-dir ./debug_out
 
 # Generate with Neural Pitch (TorchCREPE on GPU/MPS)
 ./venv/bin/python generate_karaoke.py "song.mp3" --artist "Artist" --title "Title" --pitch-engine crepe --crepe-model tiny
 
 # Generate with machine-readable progress streaming (for server / SSE relay)
 ./venv/bin/python generate_karaoke.py "song.mp3" --artist "Artist" --title "Title" --json-progress
+
+# Run AI Evaluation Benchmark against Ground-Truth Corpus
+./venv/bin/python eval/eval.py --stage all --songs "fast/*" --check-regression eval/results/baseline.json
 
 # Run Genetic Parameter Optimization
 ./venv/bin/python optimizer.py "song.mp3" --ground-truth ground_truth_sample.json

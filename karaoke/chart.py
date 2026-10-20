@@ -4,7 +4,7 @@ UltraStar Chart Generation & Formatting.
 
 from __future__ import annotations
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 
 try:
     import librosa
@@ -54,7 +54,8 @@ def generate_ultrastar_chart(
     lang: str = "de",
     key_info: Optional[Dict[str, Any]] = None,
     basic_pitch_notes: Optional[List[Dict[str, Any]]] = None,
-) -> Path:
+    return_word_notes: bool = False,
+) -> Path | Tuple[Path, List[Dict[str, Any]]]:
     """
     Builds and writes a complete UltraStar TXT score chart file.
     """
@@ -136,4 +137,6 @@ def generate_ultrastar_chart(
         f.write("\n".join(ultrastar_lines) + "\n")
 
     print(f"🎉 UltraStar Datei erfolgreich gespeichert: {output_txt_path}")
+    if return_word_notes:
+        return output_txt_path, word_notes_list
     return output_txt_path

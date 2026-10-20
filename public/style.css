@@ -1529,4 +1529,143 @@ body {
   color: #d8b4fe;
 }
 
+/* Chart Editor Modal & Interactive Piano Roll (Phase 7.1) */
+.modal-editor-card {
+  max-width: 1320px;
+  width: 96vw;
+  max-height: 94vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.editor-header-title {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.editor-header-title h2 {
+  font-size: 1.15rem;
+  margin: 0;
+  color: #fff;
+}
+
+.editor-badge {
+  background: rgba(0, 242, 254, 0.15);
+  border: 1px solid rgba(0, 242, 254, 0.4);
+  color: #00f2fe;
+  font-size: 0.72rem;
+  font-weight: 700;
+  padding: 3px 8px;
+  border-radius: 4px;
+  letter-spacing: 0.05em;
+}
+
+.editor-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.editor-save-btn {
+  background: linear-gradient(135deg, #18e882, #00f2fe);
+  border: none;
+  font-weight: 700;
+  padding: 8px 18px;
+  border-radius: 8px;
+  color: #060b18;
+  cursor: pointer;
+  transition: transform 0.15s, box-shadow 0.15s;
+}
+
+.editor-save-btn:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 14px rgba(24, 232, 130, 0.4);
+}
+
+.editor-pill {
+  background: rgba(255, 207, 51, 0.15);
+  border: 1px solid rgba(255, 207, 51, 0.4);
+  color: #ffcf33;
+  font-weight: 600;
+  font-size: 0.8rem;
+  padding: 4px 10px;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.editor-pill:hover {
+  background: rgba(255, 207, 51, 0.3);
+  transform: translateY(-1px);
+}
+
+.editor-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 14px;
+  padding: 10px 18px;
+  background: rgba(8, 10, 22, 0.85);
+  border-bottom: 1px solid var(--border-glass);
+}
+
+.toolbar-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.toolbar-label {
+  font-size: 0.75rem;
+  font-weight: 700;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  margin-right: 2px;
+}
+
+.editor-input-text {
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--border-glass);
+  border-radius: 6px;
+  color: #fff;
+  padding: 5px 8px;
+  font-size: 0.85rem;
+  width: 90px;
+}
+
+.editor-canvas-container {
+  position: relative;
+  width: 100%;
+  flex: 1;
+  min-height: 400px;
+  max-height: 520px;
+  background: #090c1a;
+  overflow: hidden;
+  cursor: crosshair;
+}
+
+#editorCanvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.editor-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 18px;
+  background: rgba(8, 10, 22, 0.95);
+  border-top: 1px solid var(--border-glass);
+  font-size: 0.82rem;
+  color: var(--text-muted);
+}
+
+.editor-stats {
+  color: #00f2fe;
+  font-weight: 600;
+}
+
+
 

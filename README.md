@@ -8,6 +8,8 @@ A full-stack, browser-based **SingStar / Let's Sing-style karaoke game** featuri
 
 - **🎮 60 FPS Web Karaoke Game**:
   - Live pitch highway rendering with note capsules, vibrato tracking, combo multipliers, particle effects, and scoring.
+  - **Render-Time Spacing**: Canvas highway renders clean visual spacing between adjacent notes without altering the underlying millisecond chart timestamps.
+  - **Interactive Chart Editor**: In-browser piano roll and pitch highway editor (`#modalChartEditor`) allowing full pitch shifts (±1 / ±12 semitones), timing nudges (±50ms), melisma splitting, syllable editing, audio preview playback, and saving directly back to `songs/<slug>/song.txt` (`POST /api/library/:slug/chart`).
   - In-browser **McLeod Pitch Method (MPM)** on raw Web Audio PCM streams with sub-cent parabolic refinement and median filtering.
   - **Dual Playback Engine**: Seamless streaming via embedded **YouTube IFrame API** (with automatic anti-embed-block fallbacks) or **Spotify Web Playback SDK** (lossless audio via OAuth 2.0 PKCE).
   - **Massive Song Library**: 6,682+ pre-indexed UltraStar songs (`public/ultrastar_index.json`), live integration with the USDB community database (28,000+ charts), and universal fallback search across LRCLIB & iTunes.
@@ -96,9 +98,12 @@ python generate_karaoke.py "path/to/song.mp3" --artist "Artist Name" --title "So
 ```
 
 #### Useful CLI Flags
-- `--pitch-engine pyin` : Ultra-fast pitch tracking (default, ~3 seconds).
-- `--pitch-engine crepe` : Neural pitch tracking via `torchcrepe` (requires GPU/MPS or modern CPU).
-- `--crepe-model full|tiny` : Neural model capacity (default: `tiny`).
+- `--pitch-engine fcpe|crepe|pyin` : Select pitch algorithm (default `fcpe` neural singing model).
+- `--quality fast|balanced|best` : Dynamic hardware profile tier.
+- `--separator demucs|roformer` : Select vocal/stem separation engine.
+- `--use-basic-pitch` : Enable Spotify Basic Pitch as second-opinion voting for melisma splits.
+- `--debug-dir <path>` : Export high-resolution `contour.png` and `report.json` for acoustic debugging.
+- `--json-progress` : Machine-readable SSE relay progress streaming.
 - `--key "Eb"` or `--key "Cm"` : Specify or override detected musical key.
 - `--vocal-range auto|female|male` : Calibrate fundamental frequency search bounds.
 
@@ -121,19 +126,26 @@ The optimizer will run parallel islands, periodically migrating top performers a
 
 ## 🧪 Testing & Verification
 
-The project includes unit test suites for both runtime environments:
+The project includes full unit test suites and an automated benchmark regression gate:
 
-### Run Web Engine & DSP Tests (Node.js)
+### Complete Regression Gate (Recommended)
 ```bash
-node tests/engine_test.js
+bash scripts/check.sh
+# or: npm run test:regression
 ```
-*Validates the 6,682-song catalog index, tests McLeod Pitch Method accuracy across 6 vocal registers (A2 to C5), vibrato tolerance, octave folding, and studio lyric alignment.*
+*Executes all JavaScript unit tests (Resolver, Jobs, Library, Engine MPM DSP), Python AI pipeline unit tests (55 tests), and runs benchmark evaluation on a fast 3-song corpus subset (`fast/*`), strictly verifying no accuracy metric regresses by > 2 percentage points against baseline.*
 
-### Run AI Pipeline Tests (Python)
+### Individual Test Suites
 ```bash
-python -m unittest tests/test_karaoke_pipeline.py
+# Node.js tests (Resolver, Jobs queue, Library streaming, Engine DSP)
+npm test
+
+# Python AI pipeline tests
+./venv/bin/python -m unittest discover tests
+
+# Benchmark evaluation against ground-truth corpus
+./venv/bin/python eval/eval.py --stage all --songs "fast/*"
 ```
-*Validates English and German monosyllable protection rules, vowel slicing, energy-weighted median pitch calculation, and UltraStar formatting.*
 
 ---
 

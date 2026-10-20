@@ -101,6 +101,9 @@ def main():
                         help="Maschinenlesbarer JSON-Progress Output für Server/SSE")
     parser.add_argument("--no-cache", action="store_true", default=False,
                         help="Stage-Cache deaktivieren")
+    # Phase 7 additions:
+    parser.add_argument("--debug-dir", default=None,
+                        help="Ausgabeordner für Debug-Artefakte (contour.png, report.json)")
 
     args = parser.parse_args()
 
@@ -129,6 +132,7 @@ def main():
         quality=args.quality,
         device=override_device,
         use_cache=not args.no_cache,
+        debug_dir=args.debug_dir,
     )
 
     if args.json_progress:
@@ -162,6 +166,7 @@ def main():
             "vocals_wav": str(result["vocals_wav"]),
             "meta_json": str(result["meta_json"]),
             "lyrics_source": result["lyrics_source"],
+            "debug_dir": str(result["debug_dir"]) if result.get("debug_dir") else None,
             "hardware": result["hardware"],
             "models_used": result["models_used"],
         }
@@ -172,6 +177,8 @@ def main():
         print(f"1. Noten-Datei (UltraStar TXT): {result['output_txt']}")
         print(f"2. Instrumental-Audio (Playback): {result['instrumental_wav']}")
         print(f"3. Metadaten (JSON): {result['meta_json']}")
+        if result.get("debug_dir"):
+            print(f"4. Debug-Artefakte (PNG + JSON): {result['debug_dir']}")
         print("⭐" * 35 + "\n")
 
 

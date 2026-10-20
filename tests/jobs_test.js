@@ -15,6 +15,7 @@ const {
   SONGS_DIR,
   listLibrarySongs,
   serveSongFile,
+  updateSongChart,
 } = require('../lib/library');
 
 console.log('🧪 RUNNING JOBS & LIBRARY TEST SUITE');
@@ -124,6 +125,21 @@ assert.strictEqual(headers['Content-Range'], 'bytes 0-15/1024');
 assert.strictEqual(headers['Content-Length'], 16);
 assert.strictEqual(headers['Accept-Ranges'], 'bytes');
 console.log('  ✓ PASS: serveSongFile HTTP 206 Range streaming');
+
+// 6. Chart Editor Update (Phase 7.1)
+const updatedChart = '#TITLE:Updated Test Song\n#ARTIST:Test Artist\n#BPM:1500\n#GAP:0\n: 0 10 65 Hel-\n: 10 10 67 lo\nE';
+const chartUpdateRes = updateSongChart(testSlug, updatedChart);
+assert.strictEqual(chartUpdateRes.success, true);
+assert.strictEqual(chartUpdateRes.edited, true);
+const savedTxt = fs.readFileSync(path.join(testDir, 'song.txt'), 'utf8');
+assert.strictEqual(savedTxt.trim(), updatedChart.trim());
+const updatedMeta = JSON.parse(fs.readFileSync(path.join(testDir, 'meta.json'), 'utf8'));
+assert.strictEqual(updatedMeta.edited, true);
+assert.strictEqual(typeof updatedMeta.lastEditedAt, 'string');
+const updatedSongs = listLibrarySongs();
+const updatedFound = updatedSongs.find((s) => s.slug === testSlug);
+assert.ok(updatedFound && updatedFound.edited === true, 'Library list should reflect edited status');
+console.log('  ✓ PASS: updateSongChart persists changes and marks meta.json.edited = true');
 
 // Clean up test directory
 try {

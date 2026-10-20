@@ -18,7 +18,7 @@ const {
   registerJobSse,
   JOBS_DIR,
 } = require('./lib/jobs');
-const { listLibrarySongs, serveSongFile, SONGS_DIR } = require('./lib/library');
+const { listLibrarySongs, serveSongFile, updateSongChart, SONGS_DIR } = require('./lib/library');
 
 const PORT = process.env.PORT || 3000;
 const PUBLIC_DIR = path.join(__dirname, 'public');
@@ -582,6 +582,37 @@ const server = http.createServer(async (req, res) => {
       const songs = listLibrarySongs();
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       return res.end(JSON.stringify({ songs }));
+    }
+
+    // Chart Editor API: Save & Read Chart (Phase 7.1)
+    const libraryChartMatch = pathname.match(/^\/api\/library\/([a-zA-Z0-9_-]+)\/chart$/);
+    if (libraryChartMatch) {
+      const slug = libraryChartMatch[1];
+      if (req.method === 'POST') {
+        const body = await readRequestBody(req);
+        const chartText = typeof body === 'string' ? body : (body.chartText || body.chart || '');
+        if (!chartText.trim()) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          return res.end(JSON.stringify({ error: 'Chart text cannot be empty' }));
+        }
+        try {
+          const result = updateSongChart(slug, chartText);
+          res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+          return res.end(JSON.stringify(result));
+        } catch (err) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          return res.end(JSON.stringify({ error: err.message }));
+        }
+      } else if (req.method === 'GET') {
+        const songTxtPath = path.join(SONGS_DIR, slug, 'song.txt');
+        if (!fs.existsSync(songTxtPath)) {
+          res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
+          return res.end(JSON.stringify({ error: 'Chart file not found' }));
+        }
+        const content = fs.readFileSync(songTxtPath, 'utf8');
+        res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
+        return res.end(content);
+      }
     }
 
     // Static & Range Streaming for /songs/<slug>/<file>

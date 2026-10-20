@@ -420,6 +420,14 @@ function bindUIEvents() {
   document.getElementById('btnBackHome').addEventListener('click', leaveStageToLobby);
   document.getElementById('btnLeaveStage').addEventListener('click', leaveStageToLobby);
 
+  // Stage Chart Editor Button
+  const btnOpenChartEditor = document.getElementById('btnOpenChartEditor');
+  if (btnOpenChartEditor) {
+    btnOpenChartEditor.addEventListener('click', () => {
+      openChartEditorFromStage();
+    });
+  }
+
   // Duet Track Selector
   document.getElementById('selectDuetTrack').addEventListener('change', (e) => {
     const idx = parseInt(e.target.value, 10) || 0;
@@ -606,6 +614,8 @@ function bindUIEvents() {
     const id = extractYouTubeId(raw);
     if (id) loadYouTubeVideoById(id);
   });
+
+  initChartEditor();
 }
 
 function setLatencyMs(ms) {
@@ -2772,32 +2782,34 @@ function renderPitchHighwayCanvas(songTime, evalTime) {
     ctx.stroke();
   }
 
-  // 2. Target Note Tubes + Syllables
+  // 2. Target Note Tubes + Syllables (with Render-time Spacing, PLAN.md Phase 7.2)
   const visibleNotes = state.notes.filter(
     (n) => n.endTime >= evalTime - pastSec - 0.5 && n.startTime <= evalTime + futureSec + 0.5
   );
 
   const barHeight = 22;
+  const visualGapPx = 3; // Render-time visual spacing between adjacent notes
   ctx.font = '600 13px -apple-system, BlinkMacSystemFont, sans-serif';
   ctx.textAlign = 'left';
 
   for (const note of visibleNotes) {
     const x1 = timeToX(note.startTime);
     const x2 = timeToX(note.endTime);
-    const width = Math.max(10, x2 - x1);
+    const rawWidth = Math.max(10, x2 - x1);
+    const drawWidth = Math.max(7, rawWidth - visualGapPx);
     const y = midiToY(note.midi) - barHeight / 2;
 
     ctx.fillStyle = note.isGolden ? 'rgba(255, 207, 51, 0.2)' : 'rgba(255, 255, 255, 0.13)';
     ctx.strokeStyle = note.isGolden ? '#ffcf33' : 'rgba(0, 242, 254, 0.6)';
     ctx.lineWidth = note.isGolden ? 2 : 1.5;
 
-    roundRect(ctx, x1, y, width, barHeight, 11);
+    roundRect(ctx, x1, y, drawWidth, barHeight, 10);
     ctx.fill();
     ctx.stroke();
 
     if (note.fillRatio > 0) {
-      const fillW = Math.max(8, width * note.fillRatio);
-      const grad = ctx.createLinearGradient(x1, y, x1 + width, y);
+      const fillW = Math.max(6, drawWidth * note.fillRatio);
+      const grad = ctx.createLinearGradient(x1, y, x1 + drawWidth, y);
       if (note.isGolden) {
         grad.addColorStop(0, '#ffcf33');
         grad.addColorStop(1, '#ff8800');
@@ -2806,7 +2818,7 @@ function renderPitchHighwayCanvas(songTime, evalTime) {
         grad.addColorStop(1, '#18e882');
       }
       ctx.fillStyle = grad;
-      roundRect(ctx, x1, y, fillW, barHeight, 11);
+      roundRect(ctx, x1, y, fillW, barHeight, 10);
       ctx.fill();
     }
 
@@ -3025,6 +3037,7 @@ function renderLibraryGrid(songs) {
 
       const durText = s.durationSec ? formatSec(s.durationSec) : '--:--';
       const scorePct = Math.round((s.qualityScore || 0.8) * 100);
+      const editedBadge = s.edited ? '<span class="badge badge-gold" title="Im Chart-Editor bearbeitet">✏️ Editiert</span>' : '';
 
       return `
       <div class="song-card" data-lib-idx="${idx}">
@@ -3034,13 +3047,19 @@ function renderLibraryGrid(songs) {
             <span class="badge ${badgeClass}">${escapeHtml(s.badgeLabel || 'KI-Song')}</span>
             <span class="badge">${durText}</span>
             <span class="badge badge-gold">${scorePct}% Sync</span>
+            ${editedBadge}
           </div>
           <h3 class="card-title">${escapeHtml(s.title)}</h3>
           <p class="card-artist">${escapeHtml(s.artist)}</p>
         </div>
-        <button class="primary-btn card-action-btn btn-play-lib" data-lib-idx="${idx}">
-          🎤 Singen
-        </button>
+        <div class="card-actions-row" style="display: flex; gap: 6px; width: 100%; margin-top: auto;">
+          <button class="primary-btn card-action-btn btn-play-lib" data-lib-idx="${idx}" style="flex: 2;">
+            🎤 Singen
+          </button>
+          <button class="small-btn card-action-btn btn-edit-lib" data-lib-idx="${idx}" title="Noten im Chart-Editor bearbeiten" style="flex: 1; padding: 6px 8px;">
+            ✏️ Edit
+          </button>
+        </div>
       </div>`;
     })
     .join('');
@@ -3051,6 +3070,24 @@ function renderLibraryGrid(songs) {
       const idx = parseInt(btn.getAttribute('data-lib-idx'), 10);
       const song = state.librarySongs[idx];
       if (song) playLibrarySong(song);
+    });
+  });
+
+  gridEl.querySelectorAll('.btn-edit-lib').forEach((btn) => {
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const idx = parseInt(btn.getAttribute('data-lib-idx'), 10);
+      const song = state.librarySongs[idx];
+      if (song) {
+        try {
+          const res = await fetch(song.chartUrl);
+          if (!res.ok) throw new Error('Konnte Notendatei nicht laden');
+          const txt = await res.text();
+          openChartEditorForSong(song, txt);
+        } catch (err) {
+          alert('Fehler beim Laden des Charts: ' + err.message);
+        }
+      }
     });
   });
 
@@ -3082,6 +3119,7 @@ async function playLibrarySong(song) {
     const txtContent = await res.text();
 
     const songMeta = {
+      slug: song.slug,
       trackName: song.title,
       artistName: song.artist,
       videoId: song.youtubeId || '',
@@ -3630,4 +3668,744 @@ async function checkSystemHealthStatus() {
     if (lbl) lbl.textContent = 'Fehler beim Abrufen des Systemstatus.';
   }
 }
+
+/* ============================================================================
+ * 12. INTERACTIVE CHART EDITOR (PLAN.md Phase 7.1)
+ * ============================================================================ */
+const MIDI_NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+
+function midiToNoteName(m) {
+  if (isNaN(m) || m === null) return '--';
+  const rounded = Math.round(m);
+  const name = MIDI_NOTE_NAMES[((rounded % 12) + 12) % 12];
+  const octave = Math.floor(rounded / 12) - 1;
+  return `${name}${octave}`;
+}
+
+const editorState = {
+  isOpen: false,
+  slug: null,
+  songMeta: null,
+  notes: [],
+  selectedNoteIndex: -1,
+  scrollTime: 0,
+  viewportDuration: 8,
+  minMidi: 48,
+  maxMidi: 76,
+  isDragging: false,
+  dragMode: null,
+  dragStartX: 0,
+  dragStartY: 0,
+  dragInitialNote: null,
+  dragInitialScroll: 0,
+  previewAudio: null,
+  isPlayingPreview: false,
+  previewTimer: null,
+};
+
+function initChartEditor() {
+  const modal = document.getElementById('modalChartEditor');
+  const btnClose = document.getElementById('btnCloseChartEditor');
+  const btnSave = document.getElementById('btnSaveChart');
+  const canvas = document.getElementById('editorCanvas');
+
+  if (btnClose && modal) {
+    btnClose.addEventListener('click', closeChartEditor);
+  }
+
+  if (btnSave) {
+    btnSave.addEventListener('click', saveChartEditorChanges);
+  }
+
+  // Pitch Shift Toolbar Buttons
+  const btnShiftOctaveDown = document.getElementById('btnShiftOctaveDown');
+  if (btnShiftOctaveDown) btnShiftOctaveDown.addEventListener('click', () => shiftSelectedNotePitch(-12));
+
+  const btnShiftPitchDown = document.getElementById('btnShiftPitchDown');
+  if (btnShiftPitchDown) btnShiftPitchDown.addEventListener('click', () => shiftSelectedNotePitch(-1));
+
+  const btnShiftPitchUp = document.getElementById('btnShiftPitchUp');
+  if (btnShiftPitchUp) btnShiftPitchUp.addEventListener('click', () => shiftSelectedNotePitch(1));
+
+  const btnShiftOctaveUp = document.getElementById('btnShiftOctaveUp');
+  if (btnShiftOctaveUp) btnShiftOctaveUp.addEventListener('click', () => shiftSelectedNotePitch(12));
+
+  // Timing Nudge Toolbar Buttons
+  const btnNudgeStartLeft = document.getElementById('btnNudgeStartLeft');
+  if (btnNudgeStartLeft) btnNudgeStartLeft.addEventListener('click', () => nudgeSelectedNoteTiming(-0.05, 0));
+
+  const btnNudgeStartRight = document.getElementById('btnNudgeStartRight');
+  if (btnNudgeStartRight) btnNudgeStartRight.addEventListener('click', () => nudgeSelectedNoteTiming(0.05, 0));
+
+  const btnNudgeEndLeft = document.getElementById('btnNudgeEndLeft');
+  if (btnNudgeEndLeft) btnNudgeEndLeft.addEventListener('click', () => nudgeSelectedNoteTiming(0, -0.05));
+
+  const btnNudgeEndRight = document.getElementById('btnNudgeEndRight');
+  if (btnNudgeEndRight) btnNudgeEndRight.addEventListener('click', () => nudgeSelectedNoteTiming(0, 0.05));
+
+  // Note Text Input
+  const inputText = document.getElementById('inputEditorSyllableText');
+  if (inputText) {
+    inputText.addEventListener('input', (e) => {
+      if (editorState.selectedNoteIndex >= 0 && editorState.notes[editorState.selectedNoteIndex]) {
+        editorState.notes[editorState.selectedNoteIndex].text = e.target.value;
+        renderChartEditorCanvas();
+      }
+    });
+  }
+
+  // Split and Delete Buttons
+  const btnSplit = document.getElementById('btnEditorSplitNote');
+  if (btnSplit) btnSplit.addEventListener('click', splitSelectedNote);
+
+  const btnDelete = document.getElementById('btnEditorDeleteNote');
+  if (btnDelete) btnDelete.addEventListener('click', deleteSelectedNote);
+
+  // Zoom Toolbar Buttons
+  const btnZoomIn = document.getElementById('btnEditorZoomIn');
+  if (btnZoomIn) {
+    btnZoomIn.addEventListener('click', () => {
+      editorState.viewportDuration = Math.max(2, editorState.viewportDuration * 0.75);
+      renderChartEditorCanvas();
+    });
+  }
+  const btnZoomOut = document.getElementById('btnEditorZoomOut');
+  if (btnZoomOut) {
+    btnZoomOut.addEventListener('click', () => {
+      editorState.viewportDuration = Math.min(30, editorState.viewportDuration * 1.33);
+      renderChartEditorCanvas();
+    });
+  }
+
+  // Transport Buttons
+  const btnRewind = document.getElementById('btnEditorRewind');
+  if (btnRewind) {
+    btnRewind.addEventListener('click', () => {
+      editorState.scrollTime = Math.max(0, editorState.scrollTime - 2.0);
+      renderChartEditorCanvas();
+    });
+  }
+  const btnForward = document.getElementById('btnEditorForward');
+  if (btnForward) {
+    btnForward.addEventListener('click', () => {
+      editorState.scrollTime += 2.0;
+      renderChartEditorCanvas();
+    });
+  }
+
+  const btnPlayPause = document.getElementById('btnEditorPlayPause');
+  if (btnPlayPause) {
+    btnPlayPause.addEventListener('click', toggleEditorAudioPreview);
+  }
+
+  // Canvas Mouse Interactions (Drag & Drop, Resize, Pan, Select)
+  if (canvas) {
+    canvas.addEventListener('mousedown', onEditorCanvasMouseDown);
+    window.addEventListener('mousemove', onEditorCanvasMouseMove);
+    window.addEventListener('mouseup', onEditorCanvasMouseUp);
+    canvas.addEventListener('wheel', onEditorCanvasWheel, { passive: false });
+  }
+
+  window.addEventListener('resize', () => {
+    if (editorState.isOpen) {
+      resizeEditorCanvas();
+      renderChartEditorCanvas();
+    }
+  });
+}
+
+function openChartEditorFromStage() {
+  if (!state.currentSong || !state.notes || state.notes.length === 0) {
+    alert('Bitte wähle zuerst einen Song aus oder lade einen Track aus der Bibliothek.');
+    return;
+  }
+  const songMeta = {
+    ...state.currentSong,
+    slug: state.currentSong.slug || null,
+  };
+  openChartEditor(songMeta, state.notes);
+}
+
+function openChartEditorForSong(song, txtContent) {
+  const parsed = parseUltraStarTxt(txtContent);
+  const trackNotes = (parsed.tracks && parsed.tracks[0] && parsed.tracks[0].notes) ? parsed.tracks[0].notes : [];
+  const songMeta = {
+    slug: song.slug,
+    trackName: song.title || parsed.title,
+    artistName: song.artist || parsed.artist,
+    instrumentalUrl: song.instrumentalUrl,
+  };
+  openChartEditor(songMeta, trackNotes);
+}
+
+function openChartEditor(songMeta, initialNotes) {
+  editorState.isOpen = true;
+  editorState.slug = songMeta.slug || null;
+  editorState.songMeta = songMeta;
+  editorState.notes = (initialNotes || []).map((n, idx) => ({
+    id: idx + 1,
+    startTime: n.startTime,
+    endTime: n.endTime,
+    duration: n.duration || (n.endTime - n.startTime),
+    midi: Math.round(n.midi),
+    text: n.text || '',
+    isGolden: !!n.isGolden,
+  }));
+  editorState.selectedNoteIndex = -1;
+
+  // Compute bounding pitches
+  const pitches = editorState.notes.map((n) => n.midi).filter((m) => !isNaN(m) && m > 0);
+  if (pitches.length > 0) {
+    editorState.minMidi = Math.max(24, Math.min(...pitches) - 4);
+    editorState.maxMidi = Math.min(108, Math.max(...pitches) + 4);
+  } else {
+    editorState.minMidi = 48;
+    editorState.maxMidi = 76;
+  }
+
+  // Scroll to first note
+  if (editorState.notes.length > 0) {
+    editorState.scrollTime = Math.max(0, editorState.notes[0].startTime - 1.0);
+  } else {
+    editorState.scrollTime = 0;
+  }
+
+  const titleEl = document.getElementById('editorSongTitle');
+  if (titleEl) {
+    const slugLabel = editorState.slug ? ` [${editorState.slug}]` : '';
+    titleEl.textContent = `${songMeta.artistName ? songMeta.artistName + ' - ' : ''}${songMeta.trackName || 'Song'}${slugLabel}`;
+  }
+
+  updateSelectedNoteUI();
+
+  const modal = document.getElementById('modalChartEditor');
+  if (modal) modal.classList.remove('hidden');
+
+  setTimeout(() => {
+    resizeEditorCanvas();
+    renderChartEditorCanvas();
+  }, 50);
+}
+
+function closeChartEditor() {
+  editorState.isOpen = false;
+  if (editorState.isPlayingPreview && editorState.previewAudio) {
+    try {
+      editorState.previewAudio.pause();
+    } catch (_) {}
+  }
+  editorState.isPlayingPreview = false;
+  if (editorState.previewTimer) {
+    clearInterval(editorState.previewTimer);
+    editorState.previewTimer = null;
+  }
+  const modal = document.getElementById('modalChartEditor');
+  if (modal) modal.classList.add('hidden');
+}
+
+function resizeEditorCanvas() {
+  const canvas = document.getElementById('editorCanvas');
+  const container = document.getElementById('editorCanvasContainer');
+  if (!canvas || !container) return;
+  const rect = container.getBoundingClientRect();
+  if (rect.width > 0 && rect.height > 0) {
+    canvas.width = Math.round(rect.width);
+    canvas.height = Math.round(rect.height);
+  }
+}
+
+function renderChartEditorCanvas() {
+  const canvas = document.getElementById('editorCanvas');
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width;
+  const H = canvas.height;
+
+  ctx.clearRect(0, 0, W, H);
+
+  // Background
+  const bgGrad = ctx.createLinearGradient(0, 0, 0, H);
+  bgGrad.addColorStop(0, '#090c1a');
+  bgGrad.addColorStop(1, '#0c1024');
+  ctx.fillStyle = bgGrad;
+  ctx.fillRect(0, 0, W, H);
+
+  const leftMargin = 50;
+  const timeW = W - leftMargin;
+  const topMargin = 26;
+  const bottomMargin = 28;
+  const usableH = H - topMargin - bottomMargin;
+
+  const minM = editorState.minMidi;
+  const maxM = editorState.maxMidi;
+  const numLanes = Math.max(1, maxM - minM + 1);
+  const laneHeight = usableH / numLanes;
+
+  const midiToY = (m) => topMargin + (maxM - m) * laneHeight;
+  const timeToX = (t) => leftMargin + ((t - editorState.scrollTime) / editorState.viewportDuration) * timeW;
+
+  // 1. Horizontal Pitch Lanes & Piano Labels
+  for (let m = minM; m <= maxM; m++) {
+    const y = midiToY(m);
+    const isC = m % 12 === 0;
+    const isBlackKey = [1, 3, 6, 8, 10].includes(m % 12);
+
+    if (isBlackKey) {
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.22)';
+      ctx.fillRect(leftMargin, y, timeW, laneHeight);
+    }
+
+    ctx.strokeStyle = isC ? 'rgba(0, 242, 254, 0.25)' : 'rgba(255, 255, 255, 0.05)';
+    ctx.lineWidth = isC ? 1.5 : 1;
+    ctx.beginPath();
+    ctx.moveTo(leftMargin, y);
+    ctx.lineTo(W, y);
+    ctx.stroke();
+
+    ctx.fillStyle = isC ? '#00f2fe' : (isBlackKey ? 'rgba(255, 255, 255, 0.45)' : 'rgba(255, 255, 255, 0.85)');
+    ctx.font = isC ? 'bold 11px sans-serif' : '10px sans-serif';
+    ctx.textAlign = 'right';
+    ctx.fillText(`${midiToNoteName(m)} (${m})`, leftMargin - 6, y + laneHeight * 0.75);
+  }
+
+  // 2. Vertical Time Grid Lines
+  const startTimeSec = Math.floor(editorState.scrollTime);
+  const endTimeSec = Math.ceil(editorState.scrollTime + editorState.viewportDuration);
+
+  ctx.textAlign = 'center';
+  ctx.font = '10px monospace';
+
+  for (let s = startTimeSec; s <= endTimeSec; s++) {
+    const x = timeToX(s);
+    if (x < leftMargin || x > W) continue;
+
+    ctx.strokeStyle = (s % 5 === 0) ? 'rgba(255, 255, 255, 0.2)' : 'rgba(255, 255, 255, 0.05)';
+    ctx.lineWidth = (s % 5 === 0) ? 1.5 : 1;
+    ctx.beginPath();
+    ctx.moveTo(x, topMargin);
+    ctx.lineTo(x, H - bottomMargin);
+    ctx.stroke();
+
+    ctx.fillStyle = (s % 5 === 0) ? '#ffcf33' : 'rgba(255, 255, 255, 0.5)';
+    ctx.fillText(`${s.toFixed(0)}s`, x, topMargin - 8);
+    ctx.fillText(`${s.toFixed(0)}s`, x, H - 10);
+  }
+
+  // 3. Render Note Blocks
+  const visualGap = 2;
+
+  for (let i = 0; i < editorState.notes.length; i++) {
+    const note = editorState.notes[i];
+    if (note.endTime < editorState.scrollTime - 0.5 || note.startTime > editorState.scrollTime + editorState.viewportDuration + 0.5) {
+      continue;
+    }
+
+    const x1 = Math.max(leftMargin, timeToX(note.startTime));
+    const x2 = timeToX(note.endTime);
+    const rawW = Math.max(8, x2 - timeToX(note.startTime));
+    const drawW = Math.max(6, rawW - visualGap);
+    const y = midiToY(note.midi) + 1;
+    const drawH = Math.max(8, laneHeight - 2);
+
+    const isSelected = i === editorState.selectedNoteIndex;
+
+    if (isSelected) {
+      ctx.fillStyle = 'rgba(0, 242, 254, 0.65)';
+      ctx.strokeStyle = '#00f2fe';
+      ctx.lineWidth = 2.5;
+    } else if (note.isGolden) {
+      ctx.fillStyle = 'rgba(255, 207, 51, 0.55)';
+      ctx.strokeStyle = '#ffcf33';
+      ctx.lineWidth = 1.5;
+    } else {
+      ctx.fillStyle = 'rgba(180, 110, 255, 0.5)';
+      ctx.strokeStyle = '#d8b4fe';
+      ctx.lineWidth = 1.2;
+    }
+
+    roundRect(ctx, x1, y, drawW, drawH, 4);
+    ctx.fill();
+    ctx.stroke();
+
+    if (isSelected) {
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(x1 + drawW - 4, y, 4, drawH);
+    }
+
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 11px sans-serif';
+    ctx.textAlign = 'left';
+    const textLabel = note.text ? `${note.text.trim()} [${note.midi}]` : `[${note.midi}]`;
+    ctx.fillText(textLabel, x1 + 4, y + drawH * 0.72);
+  }
+
+  // 4. Playhead
+  if (editorState.isPlayingPreview && editorState.previewAudio) {
+    const curTime = editorState.previewAudio.currentTime;
+    const curX = timeToX(curTime);
+    if (curX >= leftMargin && curX <= W) {
+      ctx.strokeStyle = '#ff2a85';
+      ctx.lineWidth = 2.5;
+      ctx.beginPath();
+      ctx.moveTo(curX, topMargin);
+      ctx.lineTo(curX, H - bottomMargin);
+      ctx.stroke();
+    }
+  }
+}
+
+function onEditorCanvasMouseDown(e) {
+  const canvas = document.getElementById('editorCanvas');
+  if (!canvas) return;
+  const rect = canvas.getBoundingClientRect();
+  const mx = e.clientX - rect.left;
+  const my = e.clientY - rect.top;
+
+  const leftMargin = 50;
+  const timeW = canvas.width - leftMargin;
+  const topMargin = 26;
+  const bottomMargin = 28;
+  const usableH = canvas.height - topMargin - bottomMargin;
+  const laneHeight = usableH / Math.max(1, editorState.maxMidi - editorState.minMidi + 1);
+
+  const midiToY = (m) => topMargin + (editorState.maxMidi - m) * laneHeight;
+  const timeToX = (t) => leftMargin + ((t - editorState.scrollTime) / editorState.viewportDuration) * timeW;
+
+  editorState.dragStartX = mx;
+  editorState.dragStartY = my;
+  editorState.dragInitialScroll = editorState.scrollTime;
+
+  let clickedNoteIdx = -1;
+  let clickedMode = 'move';
+
+  for (let i = editorState.notes.length - 1; i >= 0; i--) {
+    const n = editorState.notes[i];
+    const nx1 = timeToX(n.startTime);
+    const nx2 = timeToX(n.endTime);
+    const ny = midiToY(n.midi);
+
+    if (mx >= nx1 && mx <= nx2 && my >= ny && my <= ny + laneHeight) {
+      clickedNoteIdx = i;
+      if (mx >= nx2 - 8) {
+        clickedMode = 'resize-end';
+      } else {
+        clickedMode = 'move';
+      }
+      break;
+    }
+  }
+
+  if (clickedNoteIdx >= 0) {
+    editorState.selectedNoteIndex = clickedNoteIdx;
+    editorState.isDragging = true;
+    editorState.dragMode = clickedMode;
+    editorState.dragInitialNote = { ...editorState.notes[clickedNoteIdx] };
+  } else {
+    editorState.isDragging = true;
+    editorState.dragMode = 'pan';
+  }
+
+  updateSelectedNoteUI();
+  renderChartEditorCanvas();
+}
+
+function onEditorCanvasMouseMove(e) {
+  if (!editorState.isDragging || !editorState.isOpen) return;
+
+  const canvas = document.getElementById('editorCanvas');
+  if (!canvas) return;
+  const rect = canvas.getBoundingClientRect();
+  const mx = e.clientX - rect.left;
+  const my = e.clientY - rect.top;
+
+  const leftMargin = 50;
+  const timeW = canvas.width - leftMargin;
+  const topMargin = 26;
+  const bottomMargin = 28;
+  const usableH = canvas.height - topMargin - bottomMargin;
+  const laneHeight = usableH / Math.max(1, editorState.maxMidi - editorState.minMidi + 1);
+
+  const deltaX = mx - editorState.dragStartX;
+  const deltaY = my - editorState.dragStartY;
+  const deltaSec = (deltaX / timeW) * editorState.viewportDuration;
+
+  if (editorState.dragMode === 'pan') {
+    editorState.scrollTime = Math.max(0, editorState.dragInitialScroll - deltaSec);
+    renderChartEditorCanvas();
+    return;
+  }
+
+  if (editorState.selectedNoteIndex < 0 || !editorState.dragInitialNote) return;
+  const curNote = editorState.notes[editorState.selectedNoteIndex];
+
+  if (editorState.dragMode === 'resize-end') {
+    const newEnd = Math.max(curNote.startTime + 0.03, editorState.dragInitialNote.endTime + deltaSec);
+    curNote.endTime = Math.round(newEnd * 100) / 100;
+    curNote.duration = curNote.endTime - curNote.startTime;
+  } else if (editorState.dragMode === 'move') {
+    const dur = editorState.dragInitialNote.endTime - editorState.dragInitialNote.startTime;
+    const newStart = Math.max(0, editorState.dragInitialNote.startTime + deltaSec);
+    curNote.startTime = Math.round(newStart * 100) / 100;
+    curNote.endTime = Math.round((curNote.startTime + dur) * 100) / 100;
+
+    const semitoneDelta = Math.round(-deltaY / laneHeight);
+    const newMidi = Math.max(24, Math.min(108, editorState.dragInitialNote.midi + semitoneDelta));
+    curNote.midi = newMidi;
+  }
+
+  updateSelectedNoteUI();
+  renderChartEditorCanvas();
+}
+
+function onEditorCanvasMouseUp() {
+  if (editorState.isDragging) {
+    editorState.isDragging = false;
+    editorState.dragMode = null;
+    editorState.dragInitialNote = null;
+    renderChartEditorCanvas();
+  }
+}
+
+function onEditorCanvasWheel(e) {
+  e.preventDefault();
+  if (e.ctrlKey || e.metaKey) {
+    const factor = e.deltaY > 0 ? 1.15 : 0.85;
+    editorState.viewportDuration = Math.max(2, Math.min(30, editorState.viewportDuration * factor));
+  } else {
+    const scrollDelta = (e.deltaY / 100) * (editorState.viewportDuration * 0.15);
+    editorState.scrollTime = Math.max(0, editorState.scrollTime + scrollDelta);
+  }
+  renderChartEditorCanvas();
+}
+
+function shiftSelectedNotePitch(delta) {
+  if (editorState.selectedNoteIndex < 0 || !editorState.notes[editorState.selectedNoteIndex]) return;
+  const note = editorState.notes[editorState.selectedNoteIndex];
+  note.midi = Math.max(24, Math.min(108, note.midi + delta));
+
+  if (note.midi < editorState.minMidi + 2) editorState.minMidi = Math.max(24, note.midi - 3);
+  if (note.midi > editorState.maxMidi - 2) editorState.maxMidi = Math.min(108, note.midi + 3);
+
+  updateSelectedNoteUI();
+  renderChartEditorCanvas();
+}
+
+function nudgeSelectedNoteTiming(deltaStart, deltaEnd) {
+  if (editorState.selectedNoteIndex < 0 || !editorState.notes[editorState.selectedNoteIndex]) return;
+  const note = editorState.notes[editorState.selectedNoteIndex];
+
+  if (deltaStart !== 0) {
+    note.startTime = Math.max(0, Math.round((note.startTime + deltaStart) * 100) / 100);
+    if (note.endTime < note.startTime + 0.03) {
+      note.endTime = note.startTime + 0.03;
+    }
+  }
+
+  if (deltaEnd !== 0) {
+    note.endTime = Math.max(note.startTime + 0.03, Math.round((note.endTime + deltaEnd) * 100) / 100);
+  }
+
+  note.duration = note.endTime - note.startTime;
+  updateSelectedNoteUI();
+  renderChartEditorCanvas();
+}
+
+function splitSelectedNote() {
+  if (editorState.selectedNoteIndex < 0 || !editorState.notes[editorState.selectedNoteIndex]) return;
+  const note = editorState.notes[editorState.selectedNoteIndex];
+  const dur = note.endTime - note.startTime;
+  if (dur < 0.10) {
+    alert('Note ist zu kurz zum Teilen (min. 100 ms erforderlich).');
+    return;
+  }
+
+  const midTime = Math.round((note.startTime + dur / 2) * 100) / 100;
+  const origEnd = note.endTime;
+  const origText = note.text ? note.text.trim().replace(/-$/, '') : '';
+
+  note.endTime = midTime;
+  note.duration = midTime - note.startTime;
+  note.text = `${origText}-`;
+
+  const newNote = {
+    id: Date.now(),
+    startTime: midTime,
+    endTime: origEnd,
+    duration: origEnd - midTime,
+    midi: note.midi,
+    text: '~ ',
+    isGolden: note.isGolden,
+  };
+
+  editorState.notes.splice(editorState.selectedNoteIndex + 1, 0, newNote);
+  editorState.selectedNoteIndex += 1;
+
+  updateSelectedNoteUI();
+  renderChartEditorCanvas();
+}
+
+function deleteSelectedNote() {
+  if (editorState.selectedNoteIndex < 0 || !editorState.notes[editorState.selectedNoteIndex]) return;
+  editorState.notes.splice(editorState.selectedNoteIndex, 1);
+  editorState.selectedNoteIndex = Math.min(editorState.selectedNoteIndex, editorState.notes.length - 1);
+
+  updateSelectedNoteUI();
+  renderChartEditorCanvas();
+}
+
+function updateSelectedNoteUI() {
+  const infoEl = document.getElementById('editorSelectedNoteInfo');
+  const inputEl = document.getElementById('inputEditorSyllableText');
+
+  if (editorState.selectedNoteIndex >= 0 && editorState.notes[editorState.selectedNoteIndex]) {
+    const n = editorState.notes[editorState.selectedNoteIndex];
+    if (infoEl) {
+      infoEl.textContent = `Silbe: "${n.text.trim()}" | Start: ${n.startTime.toFixed(2)}s | Dauer: ${(n.duration * 1000).toFixed(0)}ms | Tonhöhe: ${midiToNoteName(n.midi)} (MIDI ${n.midi})`;
+    }
+    if (inputEl) {
+      inputEl.value = n.text;
+    }
+  } else {
+    if (infoEl) {
+      infoEl.textContent = `Noten gesamt: ${editorState.notes.length} | Keine Note gewählt`;
+    }
+    if (inputEl) {
+      inputEl.value = '';
+    }
+  }
+}
+
+function toggleEditorAudioPreview() {
+  const btn = document.getElementById('btnEditorPlayPause');
+  const instUrl = editorState.songMeta?.instrumentalUrl || (state.currentSong?.instrumentalUrl || null);
+
+  if (!instUrl) {
+    alert('Keine Instrumental-Audiodatei für Vorschau verfügbar.');
+    return;
+  }
+
+  if (editorState.isPlayingPreview && editorState.previewAudio) {
+    editorState.previewAudio.pause();
+    editorState.isPlayingPreview = false;
+    if (btn) btn.textContent = '▶️ Play';
+    if (editorState.previewTimer) {
+      clearInterval(editorState.previewTimer);
+      editorState.previewTimer = null;
+    }
+    renderChartEditorCanvas();
+    return;
+  }
+
+  if (!editorState.previewAudio) {
+    editorState.previewAudio = new Audio(instUrl);
+  }
+
+  editorState.previewAudio.currentTime = Math.max(0, editorState.scrollTime);
+  editorState.previewAudio.play().then(() => {
+    editorState.isPlayingPreview = true;
+    if (btn) btn.textContent = '⏸️ Pause';
+    editorState.previewTimer = setInterval(() => {
+      if (editorState.previewAudio) {
+        const cur = editorState.previewAudio.currentTime;
+        if (cur > editorState.scrollTime + editorState.viewportDuration) {
+          editorState.scrollTime = cur;
+        }
+        renderChartEditorCanvas();
+      }
+    }, 50);
+  }).catch((err) => {
+    alert('Fehler beim Abspielen: ' + err.message);
+  });
+}
+
+async function saveChartEditorChanges() {
+  if (editorState.notes.length === 0) {
+    alert('Keine Noten zum Speichern vorhanden.');
+    return;
+  }
+
+  const saveBtn = document.getElementById('btnSaveChart');
+  if (saveBtn) {
+    saveBtn.disabled = true;
+    saveBtn.textContent = 'Speichere Chart...';
+  }
+
+  try {
+    const title = editorState.songMeta?.trackName || 'Song';
+    const artist = editorState.songMeta?.artistName || 'Unknown Artist';
+    const displayBpm = state.displayBpm || 120;
+
+    const lines = [];
+    lines.push(`#TITLE:${title}`);
+    lines.push(`#ARTIST:${artist}`);
+    lines.push('#BPM:1500');
+    lines.push(`#REALBPM:${displayBpm}`);
+    lines.push('#GAP:0');
+    if (editorState.songMeta?.videoId) {
+      lines.push(`#VIDEO:v=${editorState.songMeta.videoId}`);
+    }
+
+    const sortedNotes = [...editorState.notes].sort((a, b) => a.startTime - b.startTime);
+    let lastEndBeat = 0;
+
+    for (let i = 0; i < sortedNotes.length; i++) {
+      const n = sortedNotes[i];
+      const sBeat = Math.round(n.startTime / 0.01);
+      const eBeat = Math.round(n.endTime / 0.01);
+      const dBeat = Math.max(3, eBeat - sBeat);
+
+      if (i > 0) {
+        const prevN = sortedNotes[i - 1];
+        const gapSec = n.startTime - prevN.endTime;
+        if (gapSec >= 0.50) {
+          const pauseBeat = Math.round((prevN.endTime + gapSec / 2) / 0.01);
+          lines.push(`- ${pauseBeat}`);
+          lastEndBeat = Math.max(lastEndBeat, pauseBeat);
+        }
+      }
+
+      const prefix = n.isGolden ? '*' : ':';
+      const textVal = n.text || '';
+      lines.push(`${prefix} ${sBeat} ${dBeat} ${Math.round(n.midi)} ${textVal}`);
+      lastEndBeat = sBeat + dBeat;
+    }
+
+    lines.push('E');
+    const chartText = lines.join('\n') + '\n';
+
+    const slug = editorState.slug || (state.currentSong?.slug || null);
+    if (slug) {
+      const res = await fetch(`/api/library/${encodeURIComponent(slug)}/chart`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chartText }),
+      });
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.error || `HTTP ${res.status}`);
+      }
+    }
+
+    if (state.currentSong) {
+      await applyParsedUltraStarChart(chartText, editorState.songMeta || state.currentSong);
+    }
+
+    const statusEl = document.getElementById('editorStatusText');
+    if (statusEl) {
+      statusEl.textContent = `✓ Chart erfolgreich gespeichert! (${sortedNotes.length} Noten, meta.json.edited = true)`;
+      statusEl.style.color = '#18e882';
+    }
+
+    alert('✓ Chart erfolgreich gespeichert! Die Änderungen sind sofort im Karaoke-Spiel aktiv.');
+    await loadLibrarySongs();
+  } catch (err) {
+    alert(`Fehler beim Speichern: ${err.message}`);
+  } finally {
+    if (saveBtn) {
+      saveBtn.disabled = false;
+      saveBtn.textContent = '💾 Chart Speichern';
+    }
+  }
+}
+
 

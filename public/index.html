@@ -272,6 +272,7 @@
               <span class="badge badge-gold" id="badgeChartSource">★ Original UltraStar Melodie</span>
               <span class="badge" id="badgeBpm">120 BPM</span>
               <span class="badge badge-sync" id="badgeSyncInfo">Sync aktiv</span>
+              <button id="btnOpenChartEditor" class="pill-btn editor-pill" title="Noten & Tonhöhe im Chart-Editor bearbeiten">✏️ Chart-Editor</button>
               <select id="selectDuetTrack" class="duet-select hidden">
                 <option value="0">🎤 Stimme 1 (Lead)</option>
                 <option value="1">🎤 Stimme 2 (Duett)</option>
@@ -658,6 +659,76 @@
             Einloggen &amp; 28.000 Songs freischalten
           </button>
         </form>
+      </div>
+    </div>
+  </div>
+
+  <!-- CHART EDITOR MODAL (Phase 7.1) -->
+  <div id="modalChartEditor" class="modal-backdrop hidden" role="dialog" aria-modal="true">
+    <div class="modal-card modal-editor-card">
+      <div class="modal-header">
+        <div class="editor-header-title">
+          <span class="editor-badge">✏️ NOTEN-EDITOR</span>
+          <h2 id="editorSongTitle">Song Chart Bearbeiten</h2>
+        </div>
+        <div class="editor-header-actions">
+          <button id="btnSaveChart" class="primary-btn editor-save-btn">💾 Chart Speichern</button>
+          <button id="btnCloseChartEditor" class="close-btn">✕</button>
+        </div>
+      </div>
+
+      <!-- Editor Toolbar -->
+      <div class="editor-toolbar">
+        <div class="toolbar-group">
+          <span class="toolbar-label">Transport:</span>
+          <button id="btnEditorRewind" class="small-btn" title="2 Sekunden zurück">⏪ -2s</button>
+          <button id="btnEditorPlayPause" class="small-btn primary-btn" title="Audio Vorschau abspielen">▶️ Play</button>
+          <button id="btnEditorForward" class="small-btn" title="2 Sekunden vor">⏩ +2s</button>
+        </div>
+
+        <div class="toolbar-group">
+          <span class="toolbar-label">Tonhöhe:</span>
+          <button id="btnShiftOctaveDown" class="small-btn" title="1 Oktave tiefer (-12 Halbtöne)">▼ -12</button>
+          <button id="btnShiftPitchDown" class="small-btn" title="1 Halbton tiefer (-1)">▼ -1</button>
+          <button id="btnShiftPitchUp" class="small-btn" title="1 Halbton höher (+1)">▲ +1</button>
+          <button id="btnShiftOctaveUp" class="small-btn" title="1 Oktave höher (+12 Halbtöne)">▲ +12</button>
+        </div>
+
+        <div class="toolbar-group">
+          <span class="toolbar-label">Timing:</span>
+          <button id="btnNudgeStartLeft" class="small-btn" title="Start 50ms früher">◀ Start</button>
+          <button id="btnNudgeStartRight" class="small-btn" title="Start 50ms später">Start ▶</button>
+          <button id="btnNudgeEndLeft" class="small-btn" title="Ende 50ms früher (kürzer)">◀ Ende</button>
+          <button id="btnNudgeEndRight" class="small-btn" title="Ende 50ms später (länger)">Ende ▶</button>
+        </div>
+
+        <div class="toolbar-group">
+          <span class="toolbar-label">Silbe:</span>
+          <input type="text" id="inputEditorSyllableText" class="editor-input-text" placeholder="Text..." title="Text der ausgewählten Silbe" />
+          <button id="btnEditorSplitNote" class="small-btn" title="Silbe in zwei Melisma-Noten teilen">✂️ Teilen</button>
+          <button id="btnEditorDeleteNote" class="small-btn accent-btn" title="Note löschen">🗑️</button>
+        </div>
+
+        <div class="toolbar-group zoom-group">
+          <span class="toolbar-label">Zoom:</span>
+          <button id="btnEditorZoomOut" class="small-btn">🔍 -</button>
+          <button id="btnEditorZoomIn" class="small-btn">🔍 +</button>
+        </div>
+      </div>
+
+      <!-- Editor Canvas Viewport -->
+      <div class="editor-canvas-container" id="editorCanvasContainer">
+        <canvas id="editorCanvas" width="1200" height="420"></canvas>
+      </div>
+
+      <!-- Editor Footer / Status -->
+      <div class="editor-footer">
+        <div class="editor-status-text" id="editorStatusText">
+          Klicke auf eine Note zum Auswählen. Ziehe Noten vertikal für Tonhöhe und horizontal für Timing.
+        </div>
+        <div class="editor-stats">
+          <span id="editorSelectedNoteInfo">Keine Note gewählt</span>
+        </div>
       </div>
     </div>
   </div>

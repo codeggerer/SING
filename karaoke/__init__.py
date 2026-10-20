@@ -32,10 +32,14 @@ from karaoke.chart import (
 from karaoke.pipeline import (
     KaraokeJob, run
 )
+from karaoke.debug_export import (
+    export_debug_artifacts
+)
 
 __all__ = [
     "KaraokeJob",
     "run",
+    "export_debug_artifacts",
     "HardwareProfile",
     "ModelSelection",
     "detect_hardware",

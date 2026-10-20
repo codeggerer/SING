@@ -183,6 +183,7 @@ def evaluate_corpus(
     inject_truth_lyrics: bool = False,
     force: bool = False,
     use_lyrics_doc: bool = True,
+    check_regression: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Run evaluation on selected corpus songs and report results.
@@ -198,11 +199,16 @@ def evaluate_corpus(
     candidate_dirs.sort(key=lambda p: p.name)
 
     # Filter by pattern
+    FAST_SUBSET = ["2raumwohnung-36-grad", "cro-easy", "queen-dont-stop-me-now"]
     matched_dirs = []
-    for d in candidate_dirs:
-        # Check against pattern (slug matching or path matching)
-        if Path(songs_pattern).name == "*" or songs_pattern == "*" or Path(songs_pattern).name in d.name or d.name in songs_pattern:
-            matched_dirs.append(d)
+
+    if songs_pattern in ("fast/*", "fast", "fast/"):
+        matched_dirs = [d for d in candidate_dirs if d.name in FAST_SUBSET]
+    else:
+        import fnmatch
+        for d in candidate_dirs:
+            if songs_pattern == "*" or fnmatch.fnmatch(d.name, songs_pattern) or songs_pattern in d.name:
+                matched_dirs.append(d)
 
     if not matched_dirs:
         print(f"⚠️  No corpus songs matching pattern '{songs_pattern}' found in {corpus_dir}")
@@ -362,6 +368,61 @@ def evaluate_corpus(
         json.dump(full_report, f, indent=2, ensure_ascii=False)
 
     print(f"\n📊 Evaluation results saved to: {out_file}\n")
+
+    # Regression Gate Verification (PLAN.md Phase 7.4)
+    if check_regression:
+        baseline_file = Path(check_regression)
+        if not baseline_file.is_absolute():
+            baseline_file = PROJECT_ROOT / baseline_file
+        if not baseline_file.exists():
+            print(f"⚠️ Regression gate baseline file not found: {baseline_file}")
+            sys.exit(1)
+
+        with open(baseline_file, "r", encoding="utf-8") as f:
+            base_data = json.load(f)
+
+        regressions = []
+        for song_slug, song_res in results_by_song.items():
+            if song_slug not in base_data.get("songs", {}):
+                continue
+            base_m = base_data["songs"][song_slug]["metrics"]
+            cur_m = song_res["metrics"]
+
+            # 1. Pitch octave_1 (higher is better): must not drop by > 2 percentage points (0.02)
+            if base_m.get("pitch_octave_1") is not None and cur_m.get("pitch_octave_1") is not None:
+                drop = base_m["pitch_octave_1"] - cur_m["pitch_octave_1"]
+                if drop > 0.02:
+                    regressions.append(
+                        f"{song_slug}: Octave ±1 pitch accuracy dropped by {drop*100:.1f}% "
+                        f"({base_m['pitch_octave_1']*100:.1f}% -> {cur_m['pitch_octave_1']*100:.1f}%)"
+                    )
+
+            # 2. False split rate (lower is better): must not increase by > 2 percentage points (0.02)
+            if base_m.get("false_split_rate") is not None and cur_m.get("false_split_rate") is not None:
+                increase = cur_m["false_split_rate"] - base_m["false_split_rate"]
+                if increase > 0.02:
+                    regressions.append(
+                        f"{song_slug}: False split rate increased by {increase*100:.1f}% "
+                        f"({base_m['false_split_rate']*100:.1f}% -> {cur_m['false_split_rate']*100:.1f}%)"
+                    )
+
+            # 3. CER (lower is better): must not increase by > 2 percentage points (0.02)
+            if base_m.get("lyrics_cer") is not None and cur_m.get("lyrics_cer") is not None:
+                cer_increase = cur_m["lyrics_cer"] - base_m["lyrics_cer"]
+                if cer_increase > 0.02:
+                    regressions.append(
+                        f"{song_slug}: Lyrics CER increased by {cer_increase*100:.1f}% "
+                        f"({base_m['lyrics_cer']*100:.1f}% -> {cur_m['lyrics_cer']*100:.1f}%)"
+                    )
+
+        if regressions:
+            print("❌ REGRESSION GATE FAILED (Metrics regressed by > 2 points against baseline):")
+            for r in regressions:
+                print(f"  - {r}")
+            sys.exit(1)
+        else:
+            print("✅ REGRESSION GATE PASSED: All metrics within 2.0% of baseline!")
+
     return full_report
 
 
@@ -425,6 +486,11 @@ def main():
         action="store_true",
         help="Ignore lyrics.json and force Whisper transcription",
     )
+    parser.add_argument(
+        "--check-regression",
+        default=None,
+        help="Path to baseline.json to verify no metric regressed by > 2 points (exit 1 on failure)",
+    )
     args = parser.parse_args()
 
     evaluate_corpus(
@@ -439,6 +505,7 @@ def main():
         inject_truth_lyrics=args.inject_truth_lyrics,
         force=args.force,
         use_lyrics_doc=not args.no_lyrics,
+        check_regression=args.check_regression,
     )
 
 

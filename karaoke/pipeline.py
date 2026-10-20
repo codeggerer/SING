@@ -20,6 +20,7 @@ from karaoke.lyrics_io import load_canonical_lyrics, transcribe_lyrics
 from karaoke.pitch import analyze_vocal_pitch, detect_song_key, mask_background_regions
 from karaoke.basicpitch_adapter import BasicPitchAdapter
 from karaoke.chart import detect_display_bpm, generate_ultrastar_chart
+from karaoke.debug_export import export_debug_artifacts
 
 
 @dataclass
@@ -38,6 +39,7 @@ class KaraokeJob:
     quality: str = DEFAULT_QUALITY
     device: Optional[str] = None
     use_cache: bool = True
+    debug_dir: Optional[Path | str] = None
 
 
 def run(
@@ -171,7 +173,7 @@ def run(
     clean_filename = f"{artist} - {title}".replace("/", "_").replace("\\", "_")
     output_txt = output_dir / f"{clean_filename}.txt"
 
-    generate_ultrastar_chart(
+    output_txt, word_notes_list = generate_ultrastar_chart(
         words,
         pitch_data,
         display_bpm,
@@ -181,7 +183,26 @@ def run(
         lang=detected_lang,
         key_info=key_info,
         basic_pitch_notes=bp_notes,
+        return_word_notes=True,
     )
+
+    # Optional: Debug Artifact Export (contour.png and report.json, PLAN.md Phase 7.3)
+    if job.debug_dir:
+        report("chart", 0.95, "Exporting debug contour plot and report...")
+        try:
+            export_debug_artifacts(
+                job.debug_dir,
+                pitch_data,
+                word_notes_list,
+                title=title,
+                artist=artist,
+                key_info=key_info,
+                pitch_engine=models.pitch_engine,
+                basic_pitch_notes=bp_notes,
+                hardware_profile=hw,
+            )
+        except Exception as e:
+            print(f"⚠️ Debug-Export fehlgeschlagen: {e}")
 
     final_instrumental = output_dir / f"{clean_filename} [Instrumental].wav"
     if instrumental_file.exists():
@@ -222,6 +243,7 @@ def run(
         "vocals_wav": vocals_file,
         "meta_json": meta_path,
         "lyrics_source": lyrics_source,
+        "debug_dir": str(Path(job.debug_dir).resolve()) if job.debug_dir else None,
         "hardware": hw.to_dict(),
         "models_used": models.to_dict(),
     }

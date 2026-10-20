@@ -12,6 +12,7 @@ Tests:
 import unittest
 import numpy as np
 import tempfile
+import json
 import os
 from pathlib import Path
 
@@ -307,6 +308,70 @@ class TestPitchExtractionAndMerging(unittest.TestCase):
         ]
         agrees = BasicPitchAdapter.votes_for_split(mock_bp_notes, 0.0, 0.80, 0.40)
         self.assertTrue(agrees)
+
+    def test_debug_artifacts_export(self):
+        """Phase 7.3: Debug export generates contour.png and report.json."""
+        from karaoke.debug_export import export_debug_artifacts
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+
+            t = np.arange(0, 2.0, 0.010)
+            midis = np.full_like(t, 60.0)
+            midis[50:100] = 64.0
+            confs = np.full_like(t, 0.9)
+            rms = np.full_like(t, 0.5)
+
+            pitch_data = {
+                "type": "contour",
+                "frame_dur_sec": 0.010,
+                "midi": midis,
+                "conf": confs,
+                "rms": rms,
+                "total_frames": len(t),
+                "tuning_cents": -5.2,
+            }
+
+            word_notes = [
+                {
+                    "pause_beat": None,
+                    "num_sylls": 1,
+                    "notes": [{"start": 0.1, "end": 0.9, "pitch": 60, "pitch_float": 60.05, "text": "Hel-"}],
+                },
+                {
+                    "pause_beat": None,
+                    "num_sylls": 1,
+                    "notes": [{"start": 0.95, "end": 1.8, "pitch": 64, "pitch_float": 63.95, "text": "lo"}],
+                },
+            ]
+
+            key_info = {"key": "C", "confidence": 0.92}
+            res = export_debug_artifacts(
+                tmp_path,
+                pitch_data,
+                word_notes,
+                title="Test Song",
+                artist="Test Artist",
+                key_info=key_info,
+                pitch_engine="fcpe",
+            )
+
+            png_file = tmp_path / "contour.png"
+            json_file = tmp_path / "report.json"
+
+            self.assertTrue(png_file.exists(), "contour.png must be created")
+            self.assertGreater(png_file.stat().st_size, 1000, "contour.png should have valid image bytes")
+
+            self.assertTrue(json_file.exists(), "report.json must be created")
+            with open(json_file, "r", encoding="utf-8") as f:
+                report = json.load(f)
+
+            self.assertEqual(report["title"], "Test Song")
+            self.assertEqual(report["artist"], "Test Artist")
+            self.assertEqual(report["detected_key"], "C")
+            self.assertEqual(len(report["syllables"]), 2)
+            self.assertEqual(report["syllables"][0]["text"], "Hel-")
+            self.assertEqual(report["syllables"][0]["pitch_midi"], 60)
 
 
 if __name__ == "__main__":
