@@ -16,8 +16,12 @@ This project consists of two tightly coupled environments:
 
 | Path | Primary Language | Description / Responsibilities |
 | :--- | :--- | :--- |
-| [`server.js`](./server.js) | Node.js (CommonJS) | **Zero-dependency API Gateway & Static Server**. Handles USDB session auth, LRCLIB/iTunes search proxying, YouTube metadata scraping, and static file delivery. |
-| [`public/app.js`](./public/app.js) | JavaScript (ES6+) | **Main Game Engine & Client DSP**. Implements Web Audio API MPM pitch detector, 60 FPS canvas highway, YouTube/Spotify players, offset sync, and scoring. |
+| [`server.js`](./server.js) | Node.js (CommonJS) | **Zero-dependency API Gateway & Static Server**. Handles USDB session auth, LRCLIB/iTunes search proxying, YouTube metadata scraping, `/api/resolve`, `/api/jobs` queue, `/api/library` catalog, and static file delivery. |
+| [`lib/lyrics.js`](./lib/lyrics.js) | Node.js (CommonJS) | **Multi-Provider Lyrics Engine**. Normalizes canonical `LyricsDoc`, manages Spicy Lyrics, Spotify Color-Lyrics, LRCLIB fallback, token buckets, and rate limits. |
+| [`lib/resolver.js`](./lib/resolver.js) | Node.js (CommonJS) | **Track & URL Resolver**. Dispatches Spotify URLs, YouTube URLs, and free-text queries to canonical track metadata with duration matching and confidence scoring. |
+| [`lib/jobs.js`](./lib/jobs.js) | Node.js (CommonJS) | **Job Queue & Generation Worker**. Single-concurrency worker for GPU/RAM protection, persistent job states, Server-Sent Events (SSE) streaming, and process cancellation. |
+| [`lib/library.js`](./lib/library.js) | Node.js (CommonJS) | **Song Library & Streaming Engine**. Scans generated songs in `songs/<slug>/`, parses `meta.json`, and serves audio with HTTP 206 Range streaming support. |
+| [`public/app.js`](./public/app.js) | JavaScript (ES6+) | **Main Game Engine & Client DSP**. Implements Web Audio API MPM pitch detector, 60 FPS canvas highway, YouTube/Spotify players, local instrumental playback, in-browser AI generator UI, and scoring. |
 | [`public/index.html`](./public/index.html) | HTML5 | **Single-Page Application Shell**. UI for lobby/search, stage arena, HUD, settings modals, and custom `.txt` loader. |
 | [`public/style.css`](./public/style.css) | CSS3 | **Dark Glassmorphism UI**. Glowing neon accents, responsive arena grid, particle canvas styling. |
 | [`public/ultrastar_index.json`](./public/ultrastar_index.json) | JSON | **Pre-Indexed Catalog**. 6,682 curated songs with title, artist, YouTube video ID, BPM, and initial gap values. |
@@ -80,8 +84,13 @@ When modifying or expanding the codebase, adhere to these architectural rules:
 # Start Web Server (serves on http://localhost:3000)
 node server.js
 
-# Run JavaScript Engine Tests (validates MPM DSP, catalog, sync math)
-node tests/engine_test.js
+# Run Complete JavaScript Test Suite (Validates Resolver, Job Queue, Library, and Engine DSP)
+npm test
+
+# Run Individual Test Suites
+npm run test:resolver
+npm run test:jobs
+npm run test:engine
 ```
 
 ### Python AI Pipeline & Tests

@@ -94,6 +94,155 @@
         </div>
       </div>
 
+      <!-- IN-BROWSER AI KARAOKE GENERATOR (PLAN.md Phase 6) -->
+      <div class="generator-box">
+        <div class="generator-header">
+          <div class="gen-title-wrap">
+            <span class="gen-badge">⚡ PHASE 6</span>
+            <h2>KI-Song Generator &amp; Chart-Erstellung</h2>
+          </div>
+          <p class="gen-desc">
+            Erstelle einen spielbaren UltraStar-Song aus jedem <strong>Spotify-Link</strong>, <strong>YouTube-Link</strong> oder Songtitel. Die KI trennt Gesang und Playback, erfasst Silben und berechnet die exakte Melodie im Browser!
+          </p>
+        </div>
+
+        <form id="formResolve" class="gen-input-bar">
+          <input
+            type="text"
+            id="inputResolve"
+            placeholder="Spotify Track-Link, YouTube-Video URL oder Song &amp; Interpret einfügen..."
+            autocomplete="off"
+          />
+          <button type="submit" id="btnResolveInput" class="primary-btn">
+            🔍 Analysieren
+          </button>
+          <label class="pill-btn upload-pill" title="Eigene Audio-Datei hochladen (.mp3, .wav, .m4a)">
+            📁 Audio-Upload
+            <input type="file" id="inputAudioUpload" accept="audio/*,.mp3,.wav,.m4a" hidden />
+          </label>
+        </form>
+
+        <!-- Resolve Loading Spinner -->
+        <div id="resolveLoading" class="loading-box hidden">
+          <div class="spinner"></div>
+          <p id="resolveLoadingText">Löse Track-Informationen, Lyrics und Video-Match auf...</p>
+        </div>
+
+        <!-- Track Resolved Preview Card -->
+        <div id="resolvePreviewCard" class="resolve-preview hidden">
+          <div class="preview-layout">
+            <img id="previewArtwork" class="preview-cover" src="" alt="Cover" />
+            <div class="preview-info">
+              <div class="preview-badges">
+                <span class="badge badge-gold" id="previewSourceBadge">Spotify</span>
+                <span class="badge" id="previewDurationBadge">3:45</span>
+                <span class="badge badge-sync" id="previewConfidenceBadge">95% Match</span>
+              </div>
+              <h3 id="previewTitle">Song Title</h3>
+              <p id="previewArtist">Artist Name</p>
+              <p class="preview-meta-note" id="previewMetaNote">Studio-Audio &amp; Lyrics bereit</p>
+            </div>
+          </div>
+
+          <!-- Advanced Generation Settings Accordion -->
+          <details class="gen-advanced-details">
+            <summary>⚙️ Erweiterte KI-Einstellungen (Tonhöhe, Stem-Modell &amp; Whisper)</summary>
+            <div class="gen-advanced-grid">
+              <div>
+                <label for="selectGenPitchEngine">Pitch-Engine:</label>
+                <select id="selectGenPitchEngine">
+                  <option value="fcpe" selected>FCPE (Neural Singing – Empfohlen)</option>
+                  <option value="crepe">TorchCREPE (Full Neural)</option>
+                  <option value="pyin">pYIN (DSP Fallback)</option>
+                </select>
+              </div>
+              <div>
+                <label for="selectGenSeparator">Stimmtrennung:</label>
+                <select id="selectGenSeparator">
+                  <option value="demucs" selected>HTDemucs (Standard)</option>
+                  <option value="roformer">Mel-Band RoFormer</option>
+                </select>
+              </div>
+              <div>
+                <label for="selectGenQuality">Qualitätsstufe:</label>
+                <select id="selectGenQuality">
+                  <option value="balanced" selected>Ausgewogen (Balanced)</option>
+                  <option value="fast">Schnell (Fast)</option>
+                  <option value="best">Höchste Präzision (Best)</option>
+                </select>
+              </div>
+              <div class="gen-checkbox-row">
+                <label class="checkbox-label">
+                  <input type="checkbox" id="chkForceWhisper" />
+                  Provider-Lyrics ignorieren (Nur Whisper nutzen)
+                </label>
+              </div>
+            </div>
+          </details>
+
+          <div class="preview-actions">
+            <button id="btnStartGeneration" class="primary-btn gen-submit-btn">
+              ⚡ KI-Karaoke jetzt generieren
+            </button>
+            <button id="btnDismissPreview" class="ghost-btn">Abbrechen</button>
+          </div>
+        </div>
+
+        <!-- Live Generation Progress Card -->
+        <div id="genProgressCard" class="gen-progress-card hidden">
+          <div class="progress-card-header">
+            <img id="progressArtwork" class="progress-thumb" src="" alt="Thumbnail" />
+            <div class="progress-meta">
+              <span class="badge badge-pink" id="progressStatusPill">KI-Verarbeitung läuft</span>
+              <h3 id="progressTitle">Song Title</h3>
+              <p id="progressArtist">Artist Name</p>
+            </div>
+            <div class="progress-percent" id="progressPercentNum">0%</div>
+          </div>
+
+          <!-- Stepper Visualizer -->
+          <div class="gen-stepper">
+            <div class="step-node" id="stepNodeLyrics"><span class="step-num">1</span> Lyrics</div>
+            <div class="step-line"></div>
+            <div class="step-node" id="stepNodeAudio"><span class="step-num">2</span> Audio</div>
+            <div class="step-line"></div>
+            <div class="step-node" id="stepNodeSeparate"><span class="step-num">3</span> Stems</div>
+            <div class="step-line"></div>
+            <div class="step-node" id="stepNodePitch"><span class="step-num">4</span> Noten</div>
+            <div class="step-line"></div>
+            <div class="step-node" id="stepNodeDone"><span class="step-num">5</span> Fertig</div>
+          </div>
+
+          <!-- Neon Progress Bar -->
+          <div class="progress-bar-wrap">
+            <div class="progress-bar-fill" id="progressBarFill" style="width: 0%;"></div>
+          </div>
+
+          <div class="progress-status-row">
+            <span class="progress-msg" id="progressStatusMessage">Warte auf Start...</span>
+            <span class="progress-stage-name" id="progressStageName">Initialisierung</span>
+          </div>
+
+          <div class="progress-actions">
+            <button id="btnCancelGeneration" class="ghost-btn">Vorgang abbrechen</button>
+            <button id="btnWhisperFallback" class="accent-btn hidden">🎙️ Mit Whisper KI-Transkription fortfahren</button>
+            <button id="btnPlayGeneratedSong" class="primary-btn hidden">🎤 Jetzt singen!</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- YOUR GENERATED SONGS LIBRARY (PLAN.md Phase 6.4) -->
+      <div id="librarySection" class="results-section">
+        <div class="section-header">
+          <h2>🎵 Deine generierten KI-Songs</h2>
+          <button id="btnRefreshLibrary" class="ghost-btn" title="Bibliothek aktualisieren">🔄 Neu laden</button>
+        </div>
+        <p id="libraryEmptyText" class="settings-desc hidden">
+          Noch keine KI-Songs vorhanden. Gib oben einen Spotify- oder YouTube-Link ein, um deinen ersten Song zu generieren!
+        </p>
+        <div id="libraryGrid" class="results-grid"></div>
+      </div>
+
       <!-- Loading Indicator -->
       <div id="searchLoading" class="loading-box hidden">
         <div class="spinner"></div>
@@ -428,6 +577,36 @@
           <div class="slider-row">
             <input type="range" id="sliderGate" min="1" max="40" step="1" value="5" />
             <span class="slider-val">Schwellwert: <strong id="lblGateVal">5</strong>%</span>
+          </div>
+        </div>
+
+        <!-- Phase 6 Settings: KI-Karaoke & Provider Keys -->
+        <div class="settings-block">
+          <h4>4. KI-Karaoke &amp; Provider-Schlüssel</h4>
+          <p class="settings-desc">
+            Optionale API-Schlüssel für maximale Silben-Präzision. Schlüssel werden sicher lokal in <code>config.local.json</code> gespeichert und niemals an Dritte gesendet.
+          </p>
+
+          <div class="mic-test-row" style="margin-bottom: 12px; gap: 8px;">
+            <label for="inputSettingSpicyKey" style="min-width: 130px; font-weight: 600;">Spicy Lyrics Key:</label>
+            <input type="password" id="inputSettingSpicyKey" placeholder="sl_sk_..." class="search-input" style="flex: 1; padding: 8px 12px; border-radius: 6px; font-size: 0.9rem;" />
+            <button id="btnSaveSettingSpicyKey" class="pill-btn">Speichern</button>
+            <span class="badge" id="statusBadgeSpicy">Prüfe...</span>
+          </div>
+
+          <div class="mic-test-row" style="margin-bottom: 12px; gap: 8px;">
+            <label for="inputSettingSpDc" style="min-width: 130px; font-weight: 600;">Spotify sp_dc:</label>
+            <input type="password" id="inputSettingSpDc" placeholder="Dein sp_dc Cookie..." class="search-input" style="flex: 1; padding: 8px 12px; border-radius: 6px; font-size: 0.9rem;" />
+            <button id="btnSaveSettingSpDc" class="pill-btn">Speichern</button>
+            <span class="badge" id="statusBadgeSpDc">Prüfe...</span>
+          </div>
+
+          <div class="calibration-box" style="margin-top: 12px;">
+            <div>
+              <strong>System-Diagnose (Hardware &amp; Tools):</strong>
+              <p id="lblSystemHealthStatus">Prüfe yt-dlp, ffmpeg und Python-Umgebung...</p>
+            </div>
+            <button id="btnCheckHealth" class="accent-btn" style="padding: 6px 12px; font-size: 0.85rem;">Status aktualisieren</button>
           </div>
         </div>
       </div>

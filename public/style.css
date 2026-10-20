@@ -1146,3 +1146,387 @@ body {
   color: #1ed760;
 }
 
+/* ==============================================================================
+ * PLAN.md Phase 6 - In-Browser AI Karaoke Generator & Library UI Styles
+ * ============================================================================== */
+
+.generator-box {
+  margin-top: 32px;
+  padding: 24px;
+  border-radius: var(--radius-lg);
+  background: linear-gradient(135deg, rgba(25, 29, 56, 0.85), rgba(16, 18, 36, 0.9));
+  border: 1px solid rgba(0, 242, 254, 0.25);
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.45), inset 0 1px 1px rgba(255, 255, 255, 0.1);
+  backdrop-filter: blur(20px);
+}
+
+.generator-header {
+  margin-bottom: 20px;
+}
+
+.gen-title-wrap {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 6px;
+}
+
+.gen-badge {
+  font-size: 0.72rem;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  padding: 3px 8px;
+  border-radius: 6px;
+  background: linear-gradient(135deg, var(--accent-cyan), var(--accent-pink));
+  color: #090a14;
+}
+
+.generator-header h2 {
+  font-size: 1.45rem;
+  font-weight: 800;
+  color: var(--text-main);
+}
+
+.gen-desc {
+  font-size: 0.92rem;
+  color: var(--text-muted);
+  line-height: 1.45;
+}
+
+.gen-input-bar {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.gen-input-bar input[type='text'] {
+  flex: 1;
+  min-width: 280px;
+  padding: 13px 18px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-glass);
+  background: rgba(9, 11, 22, 0.7);
+  color: var(--text-main);
+  font-size: 1rem;
+  outline: none;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+.gen-input-bar input[type='text']:focus {
+  border-color: var(--accent-cyan);
+  box-shadow: 0 0 14px rgba(0, 242, 254, 0.25);
+}
+
+.upload-pill {
+  cursor: pointer;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px dashed rgba(255, 255, 255, 0.3);
+  color: var(--text-main);
+  font-weight: 600;
+}
+
+.upload-pill:hover {
+  background: rgba(255, 255, 255, 0.14);
+  border-color: var(--accent-cyan);
+}
+
+/* Track Resolved Preview Card */
+.resolve-preview {
+  margin-top: 20px;
+  padding: 18px;
+  border-radius: var(--radius-md);
+  background: rgba(12, 15, 30, 0.85);
+  border: 1px solid rgba(0, 242, 254, 0.35);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  animation: fadeIn 0.3s ease;
+}
+
+.preview-layout {
+  display: flex;
+  gap: 18px;
+  align-items: center;
+}
+
+.preview-cover {
+  width: 90px;
+  height: 90px;
+  border-radius: 10px;
+  object-fit: cover;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  background: #111;
+}
+
+.preview-info {
+  flex: 1;
+}
+
+.preview-badges {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 6px;
+  flex-wrap: wrap;
+}
+
+.preview-info h3 {
+  font-size: 1.25rem;
+  font-weight: 700;
+  color: var(--text-main);
+  margin-bottom: 4px;
+}
+
+.preview-info p {
+  color: var(--text-muted);
+  font-size: 0.95rem;
+}
+
+.preview-meta-note {
+  font-size: 0.82rem !important;
+  color: var(--accent-cyan) !important;
+  margin-top: 4px;
+}
+
+.gen-advanced-details {
+  margin-top: 14px;
+  padding: 12px 14px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.gen-advanced-details summary {
+  cursor: pointer;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  outline: none;
+}
+
+.gen-advanced-details summary:hover {
+  color: var(--text-main);
+}
+
+.gen-advanced-grid {
+  margin-top: 12px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 12px;
+}
+
+.gen-advanced-grid label {
+  display: block;
+  font-size: 0.82rem;
+  color: var(--text-muted);
+  margin-bottom: 4px;
+}
+
+.gen-advanced-grid select {
+  width: 100%;
+  padding: 7px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border-glass);
+  background: rgba(10, 12, 24, 0.9);
+  color: var(--text-main);
+  font-size: 0.85rem;
+}
+
+.gen-checkbox-row {
+  grid-column: 1 / -1;
+  margin-top: 4px;
+}
+
+.preview-actions {
+  display: flex;
+  gap: 12px;
+  margin-top: 16px;
+  align-items: center;
+}
+
+.gen-submit-btn {
+  padding: 12px 24px;
+  font-size: 1rem;
+  font-weight: 700;
+}
+
+/* Generation Progress Card */
+.gen-progress-card {
+  margin-top: 20px;
+  padding: 20px;
+  border-radius: var(--radius-md);
+  background: rgba(15, 18, 38, 0.95);
+  border: 1px solid var(--accent-pink);
+  box-shadow: 0 0 25px rgba(255, 42, 133, 0.2);
+  animation: fadeIn 0.3s ease;
+}
+
+.progress-card-header {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 16px;
+}
+
+.progress-thumb {
+  width: 60px;
+  height: 60px;
+  border-radius: 8px;
+  object-fit: cover;
+  background: #111;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.progress-meta {
+  flex: 1;
+}
+
+.progress-meta h3 {
+  font-size: 1.15rem;
+  font-weight: 700;
+  color: var(--text-main);
+  margin-top: 3px;
+}
+
+.progress-meta p {
+  font-size: 0.88rem;
+  color: var(--text-muted);
+}
+
+.progress-percent {
+  font-size: 1.7rem;
+  font-weight: 800;
+  color: var(--accent-pink);
+  font-variant-numeric: tabular-nums;
+  text-shadow: 0 0 12px rgba(255, 42, 133, 0.4);
+}
+
+.badge-pink {
+  background: rgba(255, 42, 133, 0.2);
+  border: 1px solid var(--accent-pink);
+  color: var(--accent-pink);
+}
+
+/* Gen Stepper */
+.gen-stepper {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 16px;
+  padding: 0 6px;
+}
+
+.step-node {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  transition: color 0.2s;
+}
+
+.step-node.active {
+  color: var(--accent-cyan);
+  font-weight: 700;
+}
+
+.step-node.done {
+  color: var(--accent-green);
+}
+
+.step-num {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.1);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.7rem;
+}
+
+.step-node.active .step-num {
+  background: var(--accent-cyan);
+  color: #090a14;
+}
+
+.step-node.done .step-num {
+  background: var(--accent-green);
+  color: #090a14;
+}
+
+.step-line {
+  flex: 1;
+  height: 2px;
+  background: rgba(255, 255, 255, 0.08);
+  margin: 0 8px;
+}
+
+/* Neon Progress Bar */
+.progress-bar-wrap {
+  width: 100%;
+  height: 10px;
+  border-radius: 5px;
+  background: rgba(0, 0, 0, 0.5);
+  overflow: hidden;
+  position: relative;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.progress-bar-fill {
+  height: 100%;
+  border-radius: 5px;
+  background: linear-gradient(90deg, var(--accent-pink), var(--accent-cyan));
+  box-shadow: 0 0 14px var(--accent-cyan);
+  transition: width 0.3s ease;
+}
+
+.progress-status-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 10px;
+  font-size: 0.85rem;
+}
+
+.progress-msg {
+  color: var(--text-main);
+  font-weight: 500;
+}
+
+.progress-stage-name {
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.progress-actions {
+  display: flex;
+  gap: 12px;
+  margin-top: 16px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+/* Library Badge Variations */
+.badge-syllable {
+  background: rgba(24, 232, 130, 0.2);
+  border: 1px solid var(--accent-green);
+  color: var(--accent-green);
+}
+
+.badge-line {
+  background: rgba(0, 242, 254, 0.2);
+  border: 1px solid var(--accent-cyan);
+  color: var(--accent-cyan);
+}
+
+.badge-ai {
+  background: rgba(180, 110, 255, 0.2);
+  border: 1px solid #b46eff;
+  color: #d8b4fe;
+}
+
+

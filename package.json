@@ -6,7 +6,9 @@
   "private": true,
   "scripts": {
     "start": "node server.js",
-    "test": "node tests/engine_test.js",
+    "test": "node tests/resolver_test.js && node tests/jobs_test.js && node tests/engine_test.js",
+    "test:resolver": "node tests/resolver_test.js",
+    "test:jobs": "node tests/jobs_test.js",
     "test:engine": "node tests/engine_test.js",
     "test:ai": "python3 -m unittest tests/test_karaoke_pipeline.py"
   },

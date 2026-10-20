@@ -108,6 +108,22 @@ const state = {
   hitFramesCount: 0,
   particles: [],
 
+  // Phase 6 In-Browser Generator & Library State
+  resolvedTrack: null,
+  activeJobId: null,
+  activeJobSse: null,
+  activeJobPollTimer: null,
+  librarySongs: [],
+  localAudio: null,
+  generationOptions: {
+    pitchEngine: 'fcpe',
+    separator: 'demucs',
+    quality: 'balanced',
+    forceWhisper: false,
+    allowWhisperFallback: false,
+    uploadedAudioPath: null,
+  },
+
   // Microphone & Stabilized Pitch Detection
   audioCtx: null,
   analyser: null,
@@ -159,6 +175,10 @@ window.addEventListener('DOMContentLoaded', async () => {
 
   // Check USDB Connection
   await checkUsdbStatus();
+
+  // Phase 6: Load Generated KI-Songs Library and Settings
+  await loadLibrarySongs();
+  await loadLyricsSettings();
 
   await loadUltraStarCatalog();
   performSongSearch("Queen Don't Stop Me Now");
@@ -449,6 +469,80 @@ function bindUIEvents() {
   });
 
   document.getElementById('btnRunCalibration').addEventListener('click', runInteractiveLatencyCalibration);
+
+  // Phase 6 In-Browser Generator & Resolver UI Events
+  const formResolve = document.getElementById('formResolve');
+  if (formResolve) {
+    formResolve.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const val = document.getElementById('inputResolve').value.trim();
+      if (val) await handleResolveQuery(val);
+    });
+  }
+
+  const inputAudioUpload = document.getElementById('inputAudioUpload');
+  if (inputAudioUpload) {
+    inputAudioUpload.addEventListener('change', async (e) => {
+      const file = e.target.files?.[0];
+      if (file) await handleAudioUpload(file);
+      e.target.value = '';
+    });
+  }
+
+  const btnDismissPreview = document.getElementById('btnDismissPreview');
+  if (btnDismissPreview) {
+    btnDismissPreview.addEventListener('click', () => {
+      document.getElementById('resolvePreviewCard').classList.add('hidden');
+      state.resolvedTrack = null;
+    });
+  }
+
+  const btnStartGeneration = document.getElementById('btnStartGeneration');
+  if (btnStartGeneration) {
+    btnStartGeneration.addEventListener('click', () => startGenerationJob());
+  }
+
+  const btnCancelGeneration = document.getElementById('btnCancelGeneration');
+  if (btnCancelGeneration) {
+    btnCancelGeneration.addEventListener('click', () => cancelActiveGenerationJob());
+  }
+
+  const btnWhisperFallback = document.getElementById('btnWhisperFallback');
+  if (btnWhisperFallback) {
+    btnWhisperFallback.addEventListener('click', () => {
+      startGenerationJob({ forceWhisper: true, allowWhisperFallback: true });
+    });
+  }
+
+  const btnPlayGeneratedSong = document.getElementById('btnPlayGeneratedSong');
+  if (btnPlayGeneratedSong) {
+    btnPlayGeneratedSong.addEventListener('click', () => {
+      if (state.lastGeneratedSong) {
+        playLibrarySong(state.lastGeneratedSong);
+      }
+    });
+  }
+
+  const btnRefreshLibrary = document.getElementById('btnRefreshLibrary');
+  if (btnRefreshLibrary) {
+    btnRefreshLibrary.addEventListener('click', () => loadLibrarySongs());
+  }
+
+  // Phase 6 Settings: Keys & System Health
+  const btnSaveSpicy = document.getElementById('btnSaveSettingSpicyKey');
+  if (btnSaveSpicy) {
+    btnSaveSpicy.addEventListener('click', saveSpicyKey);
+  }
+
+  const btnSaveSpDc = document.getElementById('btnSaveSettingSpDc');
+  if (btnSaveSpDc) {
+    btnSaveSpDc.addEventListener('click', saveSpDc);
+  }
+
+  const btnCheckHealth = document.getElementById('btnCheckHealth');
+  if (btnCheckHealth) {
+    btnCheckHealth.addEventListener('click', checkSystemHealthStatus);
+  }
 
   // Stage Controls
   document.getElementById('btnPlayPause').addEventListener('click', togglePlayPause);
@@ -1917,6 +2011,10 @@ function handleYouTubeEmbedFallback() {
  * 7. UNIFIED PLAYBACK TIME & TRANSPORT CONTROLS (YouTube + Spotify)
  * ============================================================================ */
 function getRawPlayerTime() {
+  if (state.playbackSource === 'local' && state.localAudio) {
+    return state.localAudio.currentTime;
+  }
+
   if (state.playbackSource === 'spotify' && state.spotifyReady) {
     let posMs = state.spotifyPositionMs;
     if (state.spotifyIsPlaying && state.spotifyLastUpdateTs > 0) {
@@ -1951,6 +2049,17 @@ function getSongTimeWithOffset() {
 }
 
 function togglePlayPause() {
+  if (state.playbackSource === 'local' && state.localAudio) {
+    if (state.localAudio.paused) {
+      state.localAudio.play().catch(() => {});
+      state.isPlaying = true;
+    } else {
+      state.localAudio.pause();
+      state.isPlaying = false;
+    }
+    return;
+  }
+
   if (state.playbackSource === 'spotify' && state.spotifyPlayer) {
     state.spotifyPlayer.togglePlay().catch(() => {});
     return;
@@ -1972,6 +2081,13 @@ function togglePlayPause() {
 
 function restartSong() {
   resetScoreState();
+  if (state.playbackSource === 'local' && state.localAudio) {
+    state.localAudio.currentTime = 0;
+    state.localAudio.play().catch(() => {});
+    state.isPlaying = true;
+    return;
+  }
+
   if (state.playbackSource === 'spotify' && state.spotifyPlayer) {
     state.spotifyPlayer.seek(0).catch(() => {});
     state.spotifyPlayer.resume().catch(() => {});
@@ -1992,6 +2108,13 @@ function skipToFirstVocals() {
   const targetSongTime = Math.max(0, state.firstLyricTime - 2.8);
   const targetRawTime = Math.max(0, targetSongTime + state.videoOffsetSec);
 
+  if (state.playbackSource === 'local' && state.localAudio) {
+    state.localAudio.currentTime = Math.max(0, targetRawTime);
+    state.localAudio.play().catch(() => {});
+    state.isPlaying = true;
+    return;
+  }
+
   if (state.playbackSource === 'spotify' && state.spotifyPlayer) {
     const targetMs = Math.round(targetRawTime * 1000);
     state.spotifyPlayer.seek(targetMs).catch(() => {});
@@ -2010,6 +2133,13 @@ function skipToFirstVocals() {
 }
 
 function leaveStageToLobby() {
+  if (state.localAudio) {
+    try {
+      state.localAudio.pause();
+      state.localAudio.src = '';
+    } catch (_) {}
+    state.localAudio = null;
+  }
   if (state.ytPlayer && typeof state.ytPlayer.pauseVideo === 'function') {
     try {
       state.ytPlayer.pauseVideo();
@@ -2851,3 +2981,653 @@ function escapeHtml(str) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;');
 }
+
+/* ============================================================================
+ * 9. PLAN.md Phase 6 - IN-BROWSER AI KARAOKE GENERATOR & SONG LIBRARY CLIENT
+ * ============================================================================ */
+
+async function loadLibrarySongs() {
+  const emptyEl = document.getElementById('libraryEmptyText');
+  const gridEl = document.getElementById('libraryGrid');
+  if (!gridEl) return;
+
+  try {
+    const res = await fetch('/api/library');
+    if (!res.ok) return;
+    const data = await res.json();
+    state.librarySongs = data.songs || [];
+
+    if (state.librarySongs.length === 0) {
+      if (emptyEl) emptyEl.classList.remove('hidden');
+      gridEl.innerHTML = '';
+    } else {
+      if (emptyEl) emptyEl.classList.add('hidden');
+      renderLibraryGrid(state.librarySongs);
+    }
+  } catch (err) {
+    console.warn('Fehler beim Laden der Song-Bibliothek:', err);
+  }
+}
+
+function renderLibraryGrid(songs) {
+  const gridEl = document.getElementById('libraryGrid');
+  if (!gridEl) return;
+
+  gridEl.innerHTML = songs
+    .map((s, idx) => {
+      const coverHtml = s.coverUrl
+        ? `<img class="card-cover" src="${escapeHtml(s.coverUrl)}" alt="Cover" />`
+        : `<div class="card-cover card-cover-placeholder">🎤</div>`;
+
+      let badgeClass = 'badge-ai';
+      if (s.syncType === 'syllable') badgeClass = 'badge-syllable';
+      else if (s.syncType === 'line' || s.syncType === 'word') badgeClass = 'badge-line';
+
+      const durText = s.durationSec ? formatSec(s.durationSec) : '--:--';
+      const scorePct = Math.round((s.qualityScore || 0.8) * 100);
+
+      return `
+      <div class="song-card" data-lib-idx="${idx}">
+        ${coverHtml}
+        <div class="card-body">
+          <div class="card-badges">
+            <span class="badge ${badgeClass}">${escapeHtml(s.badgeLabel || 'KI-Song')}</span>
+            <span class="badge">${durText}</span>
+            <span class="badge badge-gold">${scorePct}% Sync</span>
+          </div>
+          <h3 class="card-title">${escapeHtml(s.title)}</h3>
+          <p class="card-artist">${escapeHtml(s.artist)}</p>
+        </div>
+        <button class="primary-btn card-action-btn btn-play-lib" data-lib-idx="${idx}">
+          🎤 Singen
+        </button>
+      </div>`;
+    })
+    .join('');
+
+  gridEl.querySelectorAll('.btn-play-lib').forEach((btn) => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const idx = parseInt(btn.getAttribute('data-lib-idx'), 10);
+      const song = state.librarySongs[idx];
+      if (song) playLibrarySong(song);
+    });
+  });
+
+  gridEl.querySelectorAll('.song-card').forEach((card) => {
+    card.addEventListener('click', () => {
+      const idx = parseInt(card.getAttribute('data-lib-idx'), 10);
+      const song = state.librarySongs[idx];
+      if (song) playLibrarySong(song);
+    });
+  });
+}
+
+async function playLibrarySong(song) {
+  resetScoreState();
+  setVideoOffset(0);
+  document.getElementById('viewLobby').classList.remove('active');
+  document.getElementById('viewStage').classList.add('active');
+
+  if (!state.micActive) {
+    startMicrophone(state.selectedDeviceId).catch(() => {});
+  }
+
+  try {
+    const res = await fetch(song.chartUrl);
+    if (!res.ok) {
+      alert('Konnte Notendatei nicht laden: ' + song.chartUrl);
+      return;
+    }
+    const txtContent = await res.text();
+
+    const songMeta = {
+      trackName: song.title,
+      artistName: song.artist,
+      videoId: song.youtubeId || '',
+      duration: song.durationSec || 210,
+      instrumentalUrl: song.instrumentalUrl,
+      artworkUrl: song.coverUrl,
+    };
+
+    await applyParsedUltraStarChart(txtContent, songMeta);
+
+    // Update Stage Cover if available
+    const coverEl = document.getElementById('stageCover');
+    if (coverEl && song.coverUrl) {
+      coverEl.src = song.coverUrl;
+    }
+
+    const badgeSource = document.getElementById('badgeChartSource');
+    if (badgeSource) {
+      badgeSource.textContent = `⚡ KI-Generiert (${escapeHtml(song.badgeLabel || 'KI-Melodie')})`;
+    }
+
+    // Use local instrumental audio track if available (pure studio karaoke without vocals!)
+    if (song.instrumentalUrl) {
+      setupLocalInstrumentalAudio(song.instrumentalUrl);
+    }
+  } catch (err) {
+    console.error('Fehler beim Starten des KI-Songs:', err);
+    alert('Fehler beim Laden des KI-Songs: ' + err.message);
+  }
+}
+
+function setupLocalInstrumentalAudio(audioUrl) {
+  state.playbackSource = 'local';
+  if (state.localAudio) {
+    try {
+      state.localAudio.pause();
+      state.localAudio.src = '';
+    } catch (_) {}
+  }
+
+  state.localAudio = new Audio(audioUrl);
+  state.localAudio.addEventListener('ended', () => {
+    state.isPlaying = false;
+  });
+  state.localAudio.addEventListener('error', (e) => {
+    console.warn('Local Audio Error, Video-Fallback aktiv:', e);
+  });
+
+  state.localAudio
+    .play()
+    .then(() => {
+      state.isPlaying = true;
+    })
+    .catch((err) => {
+      console.log('Autoplay blockiert (kann per Button gestartet werden):', err);
+    });
+}
+
+async function handleResolveQuery(inputQuery) {
+  const loadingEl = document.getElementById('resolveLoading');
+  const previewCard = document.getElementById('resolvePreviewCard');
+
+  if (loadingEl) loadingEl.classList.remove('hidden');
+  if (previewCard) previewCard.classList.add('hidden');
+
+  try {
+    const res = await fetch('/api/resolve', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ input: inputQuery }),
+    });
+
+    const data = await res.json();
+    if (!res.ok || data.error) {
+      throw new Error(data.error || 'Song konnte nicht aufgelöst werden');
+    }
+
+    displayResolvePreview(data);
+  } catch (err) {
+    alert(`Fehler bei der Analyse: ${err.message}`);
+  } finally {
+    if (loadingEl) loadingEl.classList.add('hidden');
+  }
+}
+
+async function handleAudioUpload(file) {
+  const loadingEl = document.getElementById('resolveLoading');
+  const loadingText = document.getElementById('resolveLoadingText');
+  const previewCard = document.getElementById('resolvePreviewCard');
+
+  if (loadingText) loadingText.textContent = `Lade "${file.name}" hoch (max. 80 MB)...`;
+  if (loadingEl) loadingEl.classList.remove('hidden');
+  if (previewCard) previewCard.classList.add('hidden');
+
+  try {
+    const res = await fetch('/api/upload', {
+      method: 'POST',
+      headers: {
+        'Content-Type': file.type || 'audio/wav',
+        'x-filename': encodeURIComponent(file.name),
+      },
+      body: file,
+    });
+
+    const data = await res.json();
+    if (!res.ok || !data.success) {
+      throw new Error(data.error || 'Audio-Upload fehlgeschlagen');
+    }
+
+    // Auto-detect title and artist from filename
+    const baseName = file.name.replace(/\.[^.]+$/, '');
+    let artist = 'Eigener Upload';
+    let title = baseName;
+    if (baseName.includes(' - ')) {
+      const parts = baseName.split(' - ');
+      artist = parts[0].trim();
+      title = parts.slice(1).join(' - ').trim();
+    }
+
+    const resolved = {
+      type: 'upload',
+      title,
+      artist,
+      durationSec: 0,
+      artworkUrl: '',
+      spotifyTrackId: '',
+      youtubeId: '',
+      isrc: '',
+      confidence: 1.0,
+      slug: createSongSlugClient(artist, title),
+      uploadedAudioPath: data.uploadedAudioPath,
+    };
+
+    displayResolvePreview(resolved);
+  } catch (err) {
+    alert(`Fehler beim Audio-Upload: ${err.message}`);
+  } finally {
+    if (loadingEl) loadingEl.classList.add('hidden');
+    if (loadingText) loadingText.textContent = 'Löse Track-Informationen, Lyrics und Video-Match auf...';
+  }
+}
+
+function createSongSlugClient(artist, title) {
+  const cleanArt = (artist || 'Unknown').trim();
+  const cleanTit = (title || 'Track').trim();
+  return `${cleanArt} - ${cleanTit}`
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/['’]/g, '')
+    .replace(/[^a-z0-9_-]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 80) || 'track';
+}
+
+function displayResolvePreview(resolved) {
+  state.resolvedTrack = resolved;
+
+  const previewCard = document.getElementById('resolvePreviewCard');
+  if (!previewCard) return;
+
+  const coverEl = document.getElementById('previewArtwork');
+  if (coverEl) {
+    coverEl.src = resolved.artworkUrl || 'https://via.placeholder.com/90x90/111827/00f2fe?text=KARAOKE';
+  }
+
+  const titleEl = document.getElementById('previewTitle');
+  if (titleEl) titleEl.textContent = resolved.title || 'Unbekannter Titel';
+
+  const artistEl = document.getElementById('previewArtist');
+  if (artistEl) artistEl.textContent = resolved.artist || 'Unbekannter Interpret';
+
+  const sourceBadge = document.getElementById('previewSourceBadge');
+  if (sourceBadge) {
+    if (resolved.type === 'spotify') sourceBadge.textContent = '🟢 Spotify';
+    else if (resolved.type === 'youtube') sourceBadge.textContent = '📺 YouTube';
+    else if (resolved.type === 'upload') sourceBadge.textContent = '📁 Upload';
+    else sourceBadge.textContent = '🔍 Suche';
+  }
+
+  const durBadge = document.getElementById('previewDurationBadge');
+  if (durBadge) {
+    durBadge.textContent = resolved.durationSec ? formatSec(resolved.durationSec) : '--:--';
+  }
+
+  const confBadge = document.getElementById('previewConfidenceBadge');
+  if (confBadge) {
+    const confPct = Math.round((resolved.confidence || 0.8) * 100);
+    confBadge.textContent = `${confPct}% Match`;
+  }
+
+  const noteEl = document.getElementById('previewMetaNote');
+  if (noteEl) {
+    if (resolved.youtubeId) {
+      noteEl.textContent = `✓ YouTube Studio-Audio zugeordnet (${resolved.youtubeId})`;
+    } else if (resolved.uploadedAudioPath) {
+      noteEl.textContent = '✓ Lokale Audiodatei hochgeladen';
+    } else {
+      noteEl.textContent = 'ℹ YouTube-Audio wird beim Start gesucht';
+    }
+  }
+
+  previewCard.classList.remove('hidden');
+}
+
+async function startGenerationJob(overrideOptions = {}) {
+  if (!state.resolvedTrack) {
+    alert('Bitte wähle zuerst einen Song aus');
+    return;
+  }
+
+  const pitchEngine = document.getElementById('selectGenPitchEngine')?.value || 'fcpe';
+  const separator = document.getElementById('selectGenSeparator')?.value || 'demucs';
+  const quality = document.getElementById('selectGenQuality')?.value || 'balanced';
+  const forceWhisper = document.getElementById('chkForceWhisper')?.checked || false;
+
+  const options = {
+    pitchEngine,
+    separator,
+    quality,
+    forceWhisper,
+    uploadedAudioPath: state.resolvedTrack.uploadedAudioPath || null,
+    ...overrideOptions,
+  };
+
+  const previewCard = document.getElementById('resolvePreviewCard');
+  if (previewCard) previewCard.classList.add('hidden');
+
+  const progressCard = document.getElementById('genProgressCard');
+  if (progressCard) progressCard.classList.remove('hidden');
+
+  // Fill Header
+  const thumbEl = document.getElementById('progressArtwork');
+  if (thumbEl) {
+    thumbEl.src = state.resolvedTrack.artworkUrl || 'https://via.placeholder.com/60x60/111827/ff2a85?text=KI';
+  }
+  const titleEl = document.getElementById('progressTitle');
+  if (titleEl) titleEl.textContent = state.resolvedTrack.title;
+  const artistEl = document.getElementById('progressArtist');
+  if (artistEl) artistEl.textContent = state.resolvedTrack.artist;
+
+  updateGenerationUI({
+    status: 'queued',
+    stage: 'queued',
+    progress: 0,
+    message: 'Auftrag wird an den Server übermittelt...',
+  });
+
+  try {
+    const res = await fetch('/api/jobs', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        resolved: state.resolvedTrack,
+        options,
+      }),
+    });
+
+    const data = await res.json();
+    if (!res.ok || data.error) {
+      throw new Error(data.error || 'Job konnte nicht gestartet werden');
+    }
+
+    state.activeJobId = data.jobId;
+
+    if (data.status === 'done') {
+      // Instant cache hit!
+      updateGenerationUI({
+        status: 'done',
+        stage: 'done',
+        progress: 100,
+        message: 'Song ist bereits fertig in der Bibliothek vorhanden!',
+        result: data.result,
+      });
+      await loadLibrarySongs();
+    } else {
+      listenToJobEvents(data.jobId);
+    }
+  } catch (err) {
+    updateGenerationUI({
+      status: 'error',
+      stage: 'error',
+      progress: 0,
+      message: `Fehler: ${err.message}`,
+    });
+  }
+}
+
+function listenToJobEvents(jobId) {
+  // Clear any existing SSE or poll timers
+  if (state.activeJobSse) {
+    try {
+      state.activeJobSse.close();
+    } catch (_) {}
+    state.activeJobSse = null;
+  }
+  if (state.activeJobPollTimer) {
+    clearInterval(state.activeJobPollTimer);
+    state.activeJobPollTimer = null;
+  }
+
+  // 1. Primary: Server-Sent Events (SSE)
+  try {
+    const sse = new EventSource(`/api/jobs/${encodeURIComponent(jobId)}/events`);
+    state.activeJobSse = sse;
+
+    sse.onmessage = (e) => {
+      try {
+        const payload = JSON.parse(e.data);
+        if (payload.job) {
+          updateGenerationUI(payload.job);
+          if (payload.job.status === 'done' || payload.job.status === 'error' || payload.job.status === 'cancelled') {
+            sse.close();
+            if (state.activeJobPollTimer) clearInterval(state.activeJobPollTimer);
+          }
+        }
+      } catch (_) {}
+    };
+
+    sse.onerror = () => {
+      // If SSE disconnects, polling timer takes over silently
+    };
+  } catch (err) {
+    console.warn('SSE nicht verfügbar, wechsle zu Polling:', err);
+  }
+
+  // 2. Secondary fallback: 2.5-second interval polling
+  state.activeJobPollTimer = setInterval(async () => {
+    try {
+      const res = await fetch(`/api/jobs/${encodeURIComponent(jobId)}`);
+      if (res.ok) {
+        const job = await res.json();
+        updateGenerationUI(job);
+        if (job.status === 'done' || job.status === 'error' || job.status === 'cancelled') {
+          clearInterval(state.activeJobPollTimer);
+          state.activeJobPollTimer = null;
+          if (state.activeJobSse) state.activeJobSse.close();
+        }
+      }
+    } catch (_) {}
+  }, 2500);
+}
+
+function updateGenerationUI(job) {
+  const percentEl = document.getElementById('progressPercentNum');
+  const barEl = document.getElementById('progressBarFill');
+  const msgEl = document.getElementById('progressStatusMessage');
+  const stageNameEl = document.getElementById('progressStageName');
+  const statusPill = document.getElementById('progressStatusPill');
+  const btnCancel = document.getElementById('btnCancelGeneration');
+  const btnWhisper = document.getElementById('btnWhisperFallback');
+  const btnPlay = document.getElementById('btnPlayGeneratedSong');
+
+  const pct = Math.max(0, Math.min(100, job.progress || 0));
+
+  if (percentEl) percentEl.textContent = `${pct}%`;
+  if (barEl) barEl.style.width = `${pct}%`;
+  if (msgEl) msgEl.textContent = job.message || 'Verarbeitung...';
+
+  // Stepper Nodes
+  const stepLyrics = document.getElementById('stepNodeLyrics');
+  const stepAudio = document.getElementById('stepNodeAudio');
+  const stepSep = document.getElementById('stepNodeSeparate');
+  const stepPitch = document.getElementById('stepNodePitch');
+  const stepDone = document.getElementById('stepNodeDone');
+
+  function setStepState(el, active, done) {
+    if (!el) return;
+    el.classList.toggle('active', active);
+    el.classList.toggle('done', done);
+  }
+
+  setStepState(stepLyrics, job.stage === 'lyrics', pct >= 15);
+  setStepState(stepAudio, job.stage === 'download', pct >= 30);
+  setStepState(stepSep, job.stage === 'separate', pct >= 60);
+  setStepState(stepPitch, job.stage === 'align' || job.stage === 'pitch', pct >= 90);
+  setStepState(stepDone, job.stage === 'finalize' || job.status === 'done', job.status === 'done');
+
+  // Stage name label
+  if (stageNameEl) {
+    const stageLabels = {
+      queued: 'Warteschlange',
+      lyrics: 'Songtexte & Sync',
+      download: 'Audio-Download',
+      separate: 'KI-Stimmentrennung',
+      align: 'Silben-Ausrichtung',
+      pitch: 'Melodie-Erkennung',
+      finalize: 'Chart & Bibliothek',
+      done: 'Fertiggestellt',
+      error: 'Fehlgeschlagen',
+      cancelled: 'Abgebrochen',
+    };
+    stageNameEl.textContent = stageLabels[job.stage] || job.stage || 'Initialisierung';
+  }
+
+  // Handle Whisper fallback offer
+  if (btnWhisper) {
+    if (job.canFallbackWhisper && job.status === 'error') {
+      btnWhisper.classList.remove('hidden');
+    } else {
+      btnWhisper.classList.add('hidden');
+    }
+  }
+
+  // Handle Done state
+  if (job.status === 'done') {
+    if (statusPill) {
+      statusPill.textContent = '✓ Fertiggestellt';
+      statusPill.className = 'badge badge-sync';
+    }
+    if (btnPlay) btnPlay.classList.remove('hidden');
+    if (btnCancel) btnCancel.classList.add('hidden');
+    if (job.result) state.lastGeneratedSong = job.result;
+    loadLibrarySongs();
+  } else if (job.status === 'error') {
+    if (statusPill) {
+      statusPill.textContent = '✕ Fehler';
+      statusPill.className = 'badge badge-pink';
+    }
+    if (btnPlay) btnPlay.classList.add('hidden');
+  } else {
+    if (statusPill) {
+      statusPill.textContent = '⚡ KI-Verarbeitung läuft';
+      statusPill.className = 'badge badge-pink';
+    }
+    if (btnPlay) btnPlay.classList.add('hidden');
+    if (btnCancel) btnCancel.classList.remove('hidden');
+  }
+}
+
+async function cancelActiveGenerationJob() {
+  if (!state.activeJobId) return;
+
+  if (state.activeJobSse) {
+    try {
+      state.activeJobSse.close();
+    } catch (_) {}
+    state.activeJobSse = null;
+  }
+  if (state.activeJobPollTimer) {
+    clearInterval(state.activeJobPollTimer);
+    state.activeJobPollTimer = null;
+  }
+
+  try {
+    await fetch(`/api/jobs/${encodeURIComponent(state.activeJobId)}/cancel`, {
+      method: 'POST',
+    });
+  } catch (_) {}
+
+  const progressCard = document.getElementById('genProgressCard');
+  if (progressCard) progressCard.classList.add('hidden');
+  state.activeJobId = null;
+}
+
+// Phase 6 Settings Helpers
+async function loadLyricsSettings() {
+  try {
+    const res = await fetch('/api/lyrics/status');
+    if (!res.ok) return;
+    const data = await res.json();
+
+    const badgeSpicy = document.getElementById('statusBadgeSpicy');
+    if (badgeSpicy) {
+      if (data.spicyConfigured) {
+        badgeSpicy.textContent = '✓ Aktiviert';
+        badgeSpicy.className = 'badge badge-sync';
+      } else {
+        badgeSpicy.textContent = 'Nicht konfiguriert';
+        badgeSpicy.className = 'badge';
+      }
+    }
+
+    const badgeSpDc = document.getElementById('statusBadgeSpDc');
+    if (badgeSpDc) {
+      if (data.spotifySpDcConfigured) {
+        badgeSpDc.textContent = '✓ Aktiviert';
+        badgeSpDc.className = 'badge badge-sync';
+      } else {
+        badgeSpDc.textContent = 'Nicht konfiguriert';
+        badgeSpDc.className = 'badge';
+      }
+    }
+  } catch (_) {}
+}
+
+async function saveSpicyKey() {
+  const input = document.getElementById('inputSettingSpicyKey');
+  if (!input) return;
+  const key = input.value.trim();
+  if (!key) return;
+
+  try {
+    const res = await fetch('/api/settings/spicy-key', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key }),
+    });
+    if (res.ok) {
+      input.value = '';
+      alert('✓ Spicy Lyrics Key erfolgreich lokal gespeichert!');
+      await loadLyricsSettings();
+    }
+  } catch (err) {
+    alert(`Fehler beim Speichern: ${err.message}`);
+  }
+}
+
+async function saveSpDc() {
+  const input = document.getElementById('inputSettingSpDc');
+  if (!input) return;
+  const spDc = input.value.trim();
+  if (!spDc) return;
+
+  try {
+    const res = await fetch('/api/settings/sp-dc', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ spDc }),
+    });
+    if (res.ok) {
+      input.value = '';
+      alert('✓ Spotify sp_dc Cookie erfolgreich lokal gespeichert!');
+      await loadLyricsSettings();
+    }
+  } catch (err) {
+    alert(`Fehler beim Speichern: ${err.message}`);
+  }
+}
+
+async function checkSystemHealthStatus() {
+  const lbl = document.getElementById('lblSystemHealthStatus');
+  if (lbl) lbl.textContent = 'Prüfe Umgebung...';
+
+  try {
+    const res = await fetch('/api/health');
+    if (res.ok) {
+      const data = await res.json();
+      const yt = data.ytDlpAvailable ? '✓ yt-dlp bereit' : '✗ yt-dlp fehlt';
+      const ff = data.ffmpegAvailable ? '✓ ffmpeg bereit' : '✗ ffmpeg fehlt';
+      const py = data.pythonVenvAvailable ? '✓ Python venv bereit' : '✗ Python venv fehlt';
+      if (lbl) lbl.textContent = `${yt} | ${ff} | ${py}`;
+    }
+  } catch (err) {
+    if (lbl) lbl.textContent = 'Fehler beim Abrufen des Systemstatus.';
+  }
+}
+

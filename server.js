@@ -9,6 +9,16 @@ const {
   setLocalConfig,
   setPkceToken,
 } = require('./lib/lyrics');
+const { resolveInput } = require('./lib/resolver');
+const {
+  checkSystemHealth,
+  createOrGetJob,
+  getJob,
+  cancelJob,
+  registerJobSse,
+  JOBS_DIR,
+} = require('./lib/jobs');
+const { listLibrarySongs, serveSongFile, SONGS_DIR } = require('./lib/library');
 
 const PORT = process.env.PORT || 3000;
 const PUBLIC_DIR = path.join(__dirname, 'public');
@@ -536,6 +546,133 @@ const server = http.createServer(async (req, res) => {
       return res.end(JSON.stringify(doc));
     }
 
+    // Health & Tool Status Endpoint (Phase 6.2)
+    if (pathname === '/api/health') {
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      return res.end(JSON.stringify(checkSystemHealth()));
+    }
+
+    // Resolver Endpoint (Phase 6.1)
+    if (pathname === '/api/resolve') {
+      let input = '';
+      if (req.method === 'POST') {
+        const data = await readRequestBody(req);
+        input = data.input || data.query || '';
+      } else {
+        input = parsedUrl.searchParams.get('input') || parsedUrl.searchParams.get('q') || '';
+      }
+      if (!input.trim()) {
+        res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+        return res.end(JSON.stringify({ error: 'Missing input query or URL' }));
+      }
+      try {
+        const resolved = await resolveInput(input, {
+          searchYouTubeFn: (q, d) => searchYouTube(q, d),
+        });
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        return res.end(JSON.stringify(resolved));
+      } catch (err) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        return res.end(JSON.stringify({ error: err.message || 'Resolution failed' }));
+      }
+    }
+
+    // Song Library Catalog (Phase 6.4)
+    if (pathname === '/api/library') {
+      const songs = listLibrarySongs();
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      return res.end(JSON.stringify({ songs }));
+    }
+
+    // Static & Range Streaming for /songs/<slug>/<file>
+    if (pathname.startsWith('/songs/')) {
+      return serveSongFile(req, res, pathname);
+    }
+
+    // Audio Upload Endpoint (Phase 6.2)
+    if (pathname === '/api/upload' && req.method === 'POST') {
+      const uploadDir = path.join(JOBS_DIR, 'uploads');
+      if (!fs.existsSync(uploadDir)) {
+        try {
+          fs.mkdirSync(uploadDir, { recursive: true });
+        } catch (_) {}
+      }
+      const rawFilename = req.headers['x-filename'] || 'upload.wav';
+      const safeFilename = path.basename(rawFilename).replace(/[^\w.-]/g, '_');
+      const tempPath = path.join(uploadDir, `${Date.now()}_${safeFilename}`);
+
+      const writeStream = fs.createWriteStream(tempPath);
+      let totalBytes = 0;
+      const MAX_BYTES = 80 * 1024 * 1024; // 80 MB cap
+
+      req.on('data', (chunk) => {
+        totalBytes += chunk.length;
+        if (totalBytes > MAX_BYTES) {
+          req.destroy(new Error('File exceeds maximum size limit of 80 MB'));
+        }
+      });
+
+      req.pipe(writeStream);
+
+      await new Promise((resolve, reject) => {
+        writeStream.on('finish', resolve);
+        writeStream.on('error', reject);
+        req.on('error', reject);
+      });
+
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      return res.end(
+        JSON.stringify({ success: true, uploadedAudioPath: tempPath, filename: safeFilename })
+      );
+    }
+
+    // Job Management Endpoints (Phase 6.3)
+    if (pathname === '/api/jobs' && req.method === 'POST') {
+      const data = await readRequestBody(req);
+      if (!data.resolved || (!data.resolved.title && !data.resolved.slug)) {
+        res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+        return res.end(JSON.stringify({ error: 'Missing track metadata in resolved payload' }));
+      }
+      const job = createOrGetJob(data.resolved, data.options || {});
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      return res.end(
+        JSON.stringify({
+          jobId: job.id,
+          status: job.status,
+          slug: job.slug,
+          progress: job.progress,
+          message: job.message,
+          result: job.result,
+        })
+      );
+    }
+
+    const jobEventsMatch = pathname.match(/^\/api\/jobs\/([^\/]+)\/events$/);
+    if (jobEventsMatch) {
+      const jobId = jobEventsMatch[1];
+      return registerJobSse(jobId, req, res);
+    }
+
+    const jobCancelMatch = pathname.match(/^\/api\/jobs\/([^\/]+)\/cancel$/);
+    if (jobCancelMatch && req.method === 'POST') {
+      const jobId = jobCancelMatch[1];
+      const success = cancelJob(jobId);
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      return res.end(JSON.stringify({ success }));
+    }
+
+    const jobGetMatch = pathname.match(/^\/api\/jobs\/([^\/]+)$/);
+    if (jobGetMatch && req.method === 'GET') {
+      const jobId = jobGetMatch[1];
+      const job = getJob(jobId);
+      if (!job) {
+        res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
+        return res.end(JSON.stringify({ error: 'Job not found' }));
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      return res.end(JSON.stringify(job));
+    }
+
     // USDB API Endpoints
     if (pathname === '/api/usdb/status') {
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -679,5 +816,9 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, () => {
+  const health = checkSystemHealth();
   console.log(`🎤 Sing Web-App Server läuft auf http://localhost:${PORT}`);
+  console.log(`   * yt-dlp: ${health.ytDlpAvailable ? '✓ ' + health.ytDlpPath : '✗ nicht gefunden'}`);
+  console.log(`   * ffmpeg: ${health.ffmpegAvailable ? '✓ ' + health.ffmpegPath : '✗ nicht gefunden'}`);
+  console.log(`   * Python venv: ${health.pythonVenvAvailable ? '✓ bereit' : '✗ venv nicht gefunden'}`);
 });
