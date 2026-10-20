@@ -3,6 +3,12 @@ const https = require('https');
 const fs = require('fs');
 const path = require('path');
 const url = require('url');
+const {
+  fetchLyrics,
+  getLyricsStatus,
+  setLocalConfig,
+  setPkceToken,
+} = require('./lib/lyrics');
 
 const PORT = process.env.PORT || 3000;
 const PUBLIC_DIR = path.join(__dirname, 'public');
@@ -463,6 +469,73 @@ const server = http.createServer(async (req, res) => {
   }
 
   try {
+    // Lyrics Provider API Endpoints (Phase 2)
+    if (pathname === '/api/lyrics/status') {
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      return res.end(JSON.stringify(getLyricsStatus()));
+    }
+
+    if (pathname === '/api/settings/spicy-key' && req.method === 'POST') {
+      const data = await readRequestBody(req);
+      if (typeof data.key === 'string') {
+        setLocalConfig({ spicyLyricsKey: data.key.trim() });
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        return res.end(JSON.stringify({ success: true }));
+      }
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ error: 'Missing key field' }));
+    }
+
+    if (pathname === '/api/settings/sp-dc' && req.method === 'POST') {
+      const data = await readRequestBody(req);
+      if (typeof data.spDc === 'string') {
+        setLocalConfig({ spotifySpDc: data.spDc.trim() });
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        return res.end(JSON.stringify({ success: true }));
+      }
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ error: 'Missing spDc field' }));
+    }
+
+    if (pathname === '/api/spotify/token' && req.method === 'POST') {
+      const data = await readRequestBody(req);
+      if (typeof data.token === 'string') {
+        setPkceToken(data.token);
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        return res.end(JSON.stringify({ success: true }));
+      }
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ error: 'Missing token field' }));
+    }
+
+    if (pathname === '/api/lyrics') {
+      let title = '';
+      let artist = '';
+      let durationSec = 0;
+      let spotifyTrackId = '';
+
+      if (req.method === 'POST') {
+        const data = await readRequestBody(req);
+        title = data.title || '';
+        artist = data.artist || '';
+        durationSec = data.durationSec ? parseFloat(data.durationSec) : 0;
+        spotifyTrackId = data.spotifyTrackId || '';
+      } else {
+        title = parsedUrl.searchParams.get('title') || '';
+        artist = parsedUrl.searchParams.get('artist') || '';
+        durationSec = parseFloat(parsedUrl.searchParams.get('duration') || '0') || 0;
+        spotifyTrackId = parsedUrl.searchParams.get('spotifyTrackId') || '';
+      }
+
+      const doc = await fetchLyrics({ title, artist, durationSec, spotifyTrackId });
+      if (!doc) {
+        res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
+        return res.end(JSON.stringify({ error: 'No lyrics found for track' }));
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      return res.end(JSON.stringify(doc));
+    }
+
     // USDB API Endpoints
     if (pathname === '/api/usdb/status') {
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });

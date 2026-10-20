@@ -37,9 +37,13 @@ secrets/
 # Generated Pipeline Outputs & Temporary Files
 output/
 usdb_cache/
+lyrics_cache/
+songs/
+jobs/
 eval/corpus/*/*.txt
 eval/corpus/*/*.mp3
 eval/corpus/*/*.wav
+eval/corpus/*/*.json
 eval/results/*.json
 !eval/results/baseline.json
 *.npz

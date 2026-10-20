@@ -1,0 +1,28 @@
+{
+  "lyrics": {
+    "syncType": "LINE_SYNCED",
+    "lines": [
+      {
+        "startTimeMs": "10500",
+        "words": "Today is gonna be the day",
+        "syllables": [],
+        "endTimeMs": "0"
+      },
+      {
+        "startTimeMs": "13800",
+        "words": "That they're gonna throw it back to you",
+        "syllables": [],
+        "endTimeMs": "0"
+      },
+      {
+        "startTimeMs": "18000",
+        "words": "(Back to you)",
+        "syllables": [],
+        "endTimeMs": "21000"
+      }
+    ],
+    "provider": "Musixmatch",
+    "providerLyricsId": "12345678",
+    "language": "en"
+  }
+}

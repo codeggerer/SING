@@ -1,0 +1,16 @@
+{
+  "syncType": "Line",
+  "language": "en",
+  "lines": [
+    {
+      "startTimeMs": 10000,
+      "endTimeMs": 14000,
+      "words": "Is this the real life? Is this just fantasy?"
+    },
+    {
+      "startTimeMs": 14500,
+      "endTimeMs": 19000,
+      "words": "Caught in a landslide, no escape from reality"
+    }
+  ]
+}

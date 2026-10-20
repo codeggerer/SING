@@ -641,6 +641,14 @@ def generate_ultrastar_chart(words, pitch_data, display_bpm, title, artist, outp
             if pause_sec > 1.25:
                 pause_beat = sec_to_beat(words[i-1]["end"] + 0.15)
 
+        is_already_syllable = w.get("is_syllable", False)
+        if is_already_syllable:
+            s_pitch = get_syllable_pitch(pitch_data, w_start, w_end, fallback_pitch=prev_pitch)
+            prev_pitch = s_pitch
+            raw_notes = [{"start": w_start, "end": w_end, "pitch": s_pitch, "text": raw_word}]
+            word_notes_list.append({"pause_beat": pause_beat, "notes": raw_notes, "num_sylls": 1})
+            continue
+
         syllables = split_syllables(raw_word, lang=lang, word_duration=w_dur)
         num_sylls = len(syllables)
         raw_notes = []
@@ -763,6 +771,8 @@ def main():
     parser.add_argument("--key", default="", help="Musikalische Tonart (z.B. 'Eb', 'Cm', 'F', optional)")
     parser.add_argument("--vocal-range", choices=["auto", "female", "male"], default="auto",
                         help="Gesangsbereich (auto, female, male)")
+    parser.add_argument("--lyrics-json", default=None,
+                        help="Pfad zu kanonischer lyrics.json (Phase 2)")
 
     args = parser.parse_args()
 
@@ -792,7 +802,34 @@ def main():
 
     display_bpm = detect_display_bpm(str(audio_path))
     vocals_file, instrumental_file = separate_stems(audio_path, output_dir)
-    words, detected_lang = transcribe_lyrics(vocals_file)
+
+    words = []
+    detected_lang = "en"
+    if args.lyrics_json and Path(args.lyrics_json).exists():
+        from lyrics_providers import LyricsDoc, verify_lyrics_against_audio, estimate_audio_offset
+        try:
+            doc = LyricsDoc.from_json(Path(args.lyrics_json))
+            print(f"📖 Kanonische Lyrics geladen ({doc.source}, syncType={doc.syncType}, {len(doc.lines)} Zeilen)")
+
+            is_valid, reason = verify_lyrics_against_audio(vocals_file, doc)
+            if not is_valid:
+                print(f"⚠️ Warnung: Lyrics Sanity-Check fehlgeschlagen ({reason}). Weiche auf Whisper aus...")
+                words, detected_lang = transcribe_lyrics(vocals_file)
+            else:
+                if abs(doc.lyricsOffsetSec) < 1e-4:
+                    offset = estimate_audio_offset(vocals_file, doc)
+                    if abs(offset) > 0.04:
+                        print(f"⏱️ Korrigiere Lyrics-Audio-Offset: {offset:+.3f}s")
+                        doc.lyricsOffsetSec = offset
+                words = doc.to_words_list()
+                detected_lang = doc.language or "en"
+                print(f"✅ Verwende {len(words)} Provider-Noten/Wörter ({doc.syncType})")
+        except Exception as e:
+            print(f"⚠️ Fehler beim Laden der lyrics.json ({e}). Weiche auf Whisper aus...")
+            words, detected_lang = transcribe_lyrics(vocals_file)
+    else:
+        words, detected_lang = transcribe_lyrics(vocals_file)
+
     key_info = detect_song_key(instrumental_file if instrumental_file.exists() else audio_path, manual_key=args.key)
     pitch_data = analyze_vocal_pitch(vocals_file, pitch_engine=args.pitch_engine, crepe_model=args.crepe_model, vocal_range=args.vocal_range)
 

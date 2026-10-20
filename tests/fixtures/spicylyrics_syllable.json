@@ -1,0 +1,32 @@
+{
+  "syncType": "Syllable",
+  "language": "de",
+  "provider": "community",
+  "lines": [
+    {
+      "startTimeMs": 12340,
+      "endTimeMs": 15800,
+      "words": "Un-d dann geht die Sonne auf",
+      "syllables": [
+        { "text": "Un-", "startTimeMs": 12340, "endTimeMs": 12620, "joinNext": true },
+        { "text": "d ", "startTimeMs": 12620, "endTimeMs": 12900, "joinNext": false },
+        { "text": "dann ", "startTimeMs": 12950, "endTimeMs": 13300, "joinNext": false },
+        { "text": "geht ", "startTimeMs": 13350, "endTimeMs": 13800, "joinNext": false },
+        { "text": "die ", "startTimeMs": 13850, "endTimeMs": 14200, "joinNext": false },
+        { "text": "Son-", "startTimeMs": 14250, "endTimeMs": 14900, "joinNext": true },
+        { "text": "ne ", "startTimeMs": 14900, "endTimeMs": 15300, "joinNext": false },
+        { "text": "auf", "startTimeMs": 15350, "endTimeMs": 15800, "joinNext": false }
+      ]
+    },
+    {
+      "startTimeMs": 16000,
+      "endTimeMs": 19500,
+      "words": "(oh yeah)",
+      "agent": "background",
+      "syllables": [
+        { "text": "(oh ", "startTimeMs": 16000, "endTimeMs": 17500, "joinNext": false },
+        { "text": "yeah)", "startTimeMs": 17600, "endTimeMs": 19500, "joinNext": false }
+      ]
+    }
+  ]
+}

@@ -54,14 +54,17 @@ def run_pipeline_on_song(
     output_dir: Path,
     pitch_engine: str = "pyin",
     inject_truth_chart: Optional[UltraStarChart] = None,
+    lyrics_json_path: Optional[Path] = None,
 ) -> Path:
     """
     Run generate_karaoke.py on a song.
     If inject_truth_chart is provided, uses truth timings/lyrics to isolate pitch evaluation.
+    If lyrics_json_path is provided, uses canonical lyrics document (Phase 2).
     Returns path to generated UltraStar .txt file.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     import generate_karaoke as gk
+    from lyrics_providers import LyricsDoc
 
     # Step 1: Vocal separation (cached if already present)
     vocals_file, instrumental_file = gk.separate_stems(audio_path, output_dir=output_dir)
@@ -78,7 +81,6 @@ def run_pipeline_on_song(
 
     if inject_truth_chart:
         # Isolate pitch: use truth syllables and timings
-        # Convert truth notes into word/syllable structures expected by chart generator
         truth_words = []
         for n in inject_truth_chart.notes:
             truth_words.append({
@@ -98,8 +100,29 @@ def run_pipeline_on_song(
             lang=lang,
             key_info=key_info,
         )
+    elif lyrics_json_path and lyrics_json_path.exists():
+        # Phase 2: Canonical lyrics doc
+        doc = LyricsDoc.from_json(lyrics_json_path)
+        if abs(doc.lyricsOffsetSec) < 1e-4:
+            from lyrics_providers import estimate_audio_offset
+            offset = estimate_audio_offset(vocals_file, doc, max_lag_sec=30.0)
+            if abs(offset) > 0.04:
+                print(f"  ⏱️ Korrigiere Lyrics-Audio-Offset: {offset:+.3f}s")
+                doc.lyricsOffsetSec = offset
+        words = doc.to_words_list()
+        lang = (doc.language or "en").lower()[:2]
+        gk.generate_ultrastar_chart(
+            words,
+            pitch_data,
+            120,
+            audio_path.stem,
+            "Unknown Artist",
+            output_txt,
+            lang=lang,
+            key_info=key_info,
+        )
     else:
-        # Full end-to-end pipeline: Whisper transcription + alignment + pitch
+        # Full fallback: Whisper transcription + alignment + pitch
         words, detected_lang = gk.transcribe_lyrics(vocals_file)
         gk.generate_ultrastar_chart(
             words,
@@ -142,6 +165,7 @@ def evaluate_corpus(
     pitch_engine: str = "pyin",
     inject_truth_lyrics: bool = False,
     force: bool = False,
+    use_lyrics_doc: bool = True,
 ) -> Dict[str, Any]:
     """
     Run evaluation on selected corpus songs and report results.
@@ -187,12 +211,14 @@ def evaluate_corpus(
         if force or not gen_txt_path.exists() or inject_truth_lyrics:
             print(f"▶ Generating chart for {slug}...")
             inject_chart = truth_chart if (inject_truth_lyrics or stage == "pitch") else None
+            lyrics_json = (d / "lyrics.json") if (use_lyrics_doc and (d / "lyrics.json").exists()) else None
             try:
                 gen_txt_path = run_pipeline_on_song(
                     audio_path,
                     out_gen_dir,
                     pitch_engine=pitch_engine,
                     inject_truth_chart=inject_chart,
+                    lyrics_json_path=lyrics_json,
                 )
             except Exception as e:
                 print(f"  ✗ Failed to generate for {slug}: {e}")
@@ -363,6 +389,11 @@ def main():
         action="store_true",
         help="Force re-generation of charts even if already cached",
     )
+    parser.add_argument(
+        "--no-lyrics",
+        action="store_true",
+        help="Ignore lyrics.json and force Whisper transcription",
+    )
     args = parser.parse_args()
 
     evaluate_corpus(
@@ -374,6 +405,7 @@ def main():
         pitch_engine=args.pitch_engine,
         inject_truth_lyrics=args.inject_truth_lyrics,
         force=args.force,
+        use_lyrics_doc=not args.no_lyrics,
     )
 
 
