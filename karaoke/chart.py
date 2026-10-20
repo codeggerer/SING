@@ -16,7 +16,7 @@ from karaoke.config import (
     MIN_NOTE_DUR_BEATS, MIN_NOTE_GAP_BEATS,
 )
 from karaoke.notes import (
-    sec_to_beat, build_word_notes, apply_subharmonic_recovery, apply_scale_snapping
+    sec_to_beat, build_word_notes, apply_global_octave_tessitura, apply_subharmonic_recovery, apply_scale_snapping
 )
 
 
@@ -53,6 +53,7 @@ def generate_ultrastar_chart(
     output_txt_path: Path | str,
     lang: str = "de",
     key_info: Optional[Dict[str, Any]] = None,
+    basic_pitch_notes: Optional[List[Dict[str, Any]]] = None,
 ) -> Path:
     """
     Builds and writes a complete UltraStar TXT score chart file.
@@ -75,15 +76,16 @@ def generate_ultrastar_chart(
         ultrastar_lines.append(f"#KEY:{key_info['key']}")
 
     scale_pcs = key_info["scale_pcs"] if (key_info and "scale_pcs" in key_info) else set()
+    key_confidence = float(key_info.get("confidence", 1.0)) if key_info else 1.0
 
     # Pass 1: Raw notes extraction for all words
-    word_notes_list = build_word_notes(words, pitch_data, lang=lang)
+    word_notes_list = build_word_notes(words, pitch_data, lang=lang, basic_pitch_notes=basic_pitch_notes)
 
     # Pass 2: Global Tessitura Analysis & Subharmonic Octave Recovery
-    apply_subharmonic_recovery(word_notes_list)
+    apply_global_octave_tessitura(word_notes_list)
 
-    # Pass 3: Scale Snapping (In-Key Tuning)
-    apply_scale_snapping(word_notes_list, scale_pcs)
+    # Pass 3: Soft Scale Snapping (In-Key Tuning)
+    apply_scale_snapping(word_notes_list, scale_pcs, confidence=key_confidence)
 
     # Pass 4: Syllable Formatting, Note Preservation & Word Spacing
     last_end_beat = 0

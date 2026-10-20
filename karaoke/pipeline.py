@@ -17,7 +17,8 @@ from karaoke.hardware import HardwareProfile, ModelSelection, detect_hardware, s
 from karaoke.cache import StageCache
 from karaoke.separate import separate_stems
 from karaoke.lyrics_io import load_canonical_lyrics, transcribe_lyrics
-from karaoke.pitch import analyze_vocal_pitch, detect_song_key
+from karaoke.pitch import analyze_vocal_pitch, detect_song_key, mask_background_regions
+from karaoke.basicpitch_adapter import BasicPitchAdapter
 from karaoke.chart import detect_display_bpm, generate_ultrastar_chart
 
 
@@ -29,6 +30,8 @@ class KaraokeJob:
     output_dir: Path | str = "./output"
     pitch_engine: str = DEFAULT_PITCH_ENGINE
     crepe_model: str = DEFAULT_CREPE_MODEL
+    separator: str = "demucs"
+    use_basic_pitch: bool = False
     key: str = ""
     vocal_range: str = "auto"
     lyrics_json: Optional[Path | str] = None
@@ -77,6 +80,7 @@ def run(
         quality=job.quality,
         requested_pitch_engine=job.pitch_engine,
         requested_crepe_model=job.crepe_model,
+        requested_separator=job.separator,
     )
 
     # 2. Stage Cache
@@ -91,6 +95,7 @@ def run(
     vocals_file, instrumental_file = separate_stems(
         audio_path,
         output_dir=output_dir,
+        separator=job.separator,
         hardware_profile=hw,
         model_selection=models,
         stage_cache=stage_cache,
@@ -106,6 +111,7 @@ def run(
 
     key_info = detect_song_key(
         instrumental_file if instrumental_file.exists() else audio_path,
+        vocal_path=vocals_file,
         manual_key=job.key,
         stage_cache=stage_cache,
     )
@@ -151,6 +157,14 @@ def run(
             progress_cb=lyrics_progress,
         )
 
+    # Optional: Basic Pitch note prediction for split voting & octave tie-breaking
+    bp_notes = None
+    if job.use_basic_pitch:
+        report("pitch", 0.64, "Extracting Basic Pitch note events (second opinion)...")
+        bp_adapter = BasicPitchAdapter()
+        if bp_adapter.is_available:
+            bp_notes = bp_adapter.predict_notes(vocals_file)
+
     # Step 5: UltraStar Chart Generation & Playback Assembly (weight: 0.85 -> 0.98)
     report("chart", 0.88, "Building UltraStar chart file...")
 
@@ -166,6 +180,7 @@ def run(
         output_txt,
         lang=detected_lang,
         key_info=key_info,
+        basic_pitch_notes=bp_notes,
     )
 
     final_instrumental = output_dir / f"{clean_filename} [Instrumental].wav"

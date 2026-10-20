@@ -225,6 +225,89 @@ class TestPitchExtractionAndMerging(unittest.TestCase):
             if os.path.exists(temp_path):
                 os.remove(temp_path)
 
+    def test_clean_f0_pipeline(self):
+        """Phase 5.3: clean_f0 removes octave jumps, suppresses vibrato, and masks unvoiced."""
+        from karaoke.pitch import clean_f0
+
+        t = np.arange(0, 3.0, 0.010)
+        # Base pitch 440 Hz (MIDI 69) with 6 Hz vibrato + octave jump
+        f0 = 440.0 * (2.0 ** ((0.5 * np.sin(2 * np.pi * 6.0 * t)) / 12.0))
+        # Frame 100-105: octave double jump
+        f0[100:106] *= 2.0
+
+        v_prob = np.ones_like(t) * 0.95
+        # Frame 0-10 and 280-300: unvoiced
+        v_prob[:10] = 0.1
+        v_prob[280:] = 0.1
+
+        rms = np.ones_like(t) * 0.2
+        rms[:10] = 0.00001
+        rms[280:] = 0.00001
+
+        midi_float, cleaned_conf, tuning_cents = clean_f0(t, f0, v_prob, rms)
+
+        # Unvoiced frames should be NaN
+        self.assertTrue(np.all(np.isnan(midi_float[:10])))
+        self.assertTrue(np.all(np.isnan(midi_float[280:])))
+
+        # Octave jump around 100-105 should be repaired to near 69
+        self.assertAlmostEqual(midi_float[102], 69.0, delta=1.0)
+
+        # Vibrato should be smoothed (std dev significantly reduced around 69)
+        voiced_midis = midi_float[20:80]
+        self.assertLess(np.std(voiced_midis), 0.35)
+
+    def test_soft_scale_snapping(self):
+        """Phase 5.5: soft scale snapping respects accidentals and requires >=0.6 confidence."""
+        from karaoke.pitch import soft_snap_to_scale
+
+        c_major_pcs = {0, 2, 4, 5, 7, 9, 11}
+
+        # 1. Close to scale tone (within 0.35 st): 60.2 -> snaps to 60 (C)
+        self.assertEqual(soft_snap_to_scale(60.2, c_major_pcs, confidence=0.8), 60)
+
+        # 2. Close to out-of-scale tone: 61.1 (C# is out of C major)
+        # 61.1 is 0.9 st away from 62 (D) and 1.1 st away from 60 (C), dev > 0.35 -> keeps 61!
+        self.assertEqual(soft_snap_to_scale(61.0, c_major_pcs, confidence=0.8), 61)
+
+        # 3. Low confidence (< 0.6): does not snap, keeps round(midi_float)
+        self.assertEqual(soft_snap_to_scale(60.3, c_major_pcs, confidence=0.4), 60)
+
+    def test_vibrato_does_not_split(self):
+        """Phase 5.4: vibrato and glides must NEVER be split into multiple notes."""
+        from karaoke.pitch import detect_syllable_split
+
+        t = np.arange(0, 0.8, 0.010)
+        # 800 ms with strong 5.5 Hz vibrato
+        midis = 65.0 + 0.8 * np.sin(2 * np.pi * 5.5 * t)
+        confs = np.ones_like(t) * 0.95
+        pitch_data = {
+            "type": "contour",
+            "frame_dur_sec": 0.010,
+            "midi": midis,
+            "conf": confs,
+            "total_frames": len(t),
+        }
+
+        split = detect_syllable_split(pitch_data, 0.0, 0.8, has_tilde=False)
+        self.assertIsNone(split, "Vibrato should not trigger a melisma split!")
+
+    def test_basic_pitch_adapter_interface(self):
+        """Phase 5.6: BasicPitchAdapter initializes and provides agreement helpers."""
+        from karaoke.basicpitch_adapter import BasicPitchAdapter
+
+        adapter = BasicPitchAdapter()
+        # Should report availability boolean
+        self.assertIsInstance(adapter.is_available, bool)
+
+        # Test agreement helper with synthetic note events
+        mock_bp_notes = [
+            {"start": 0.0, "end": 0.40, "pitch": 60, "amplitude": 0.8},
+            {"start": 0.41, "end": 0.80, "pitch": 64, "amplitude": 0.8},
+        ]
+        agrees = BasicPitchAdapter.votes_for_split(mock_bp_notes, 0.0, 0.80, 0.40)
+        self.assertTrue(agrees)
+
 
 if __name__ == "__main__":
     unittest.main()

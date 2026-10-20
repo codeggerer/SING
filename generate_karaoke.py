@@ -42,13 +42,20 @@ from karaoke import (
     compute_audio_rms,
     detect_song_key,
     snap_pitch_to_scale,
+    soft_snap_to_scale,
+    track_f0,
+    clean_f0,
     analyze_vocal_pitch,
     _analyze_pitch_crepe,
     _analyze_pitch_pyin,
     get_syllable_pitch,
     detect_melisma_pitches,
+    detect_syllable_split,
+    mask_background_regions,
+    BasicPitchAdapter,
     sec_to_beat,
     build_word_notes,
+    apply_global_octave_tessitura,
     apply_subharmonic_recovery,
     apply_scale_snapping,
     detect_display_bpm,
@@ -72,10 +79,14 @@ def main():
     parser.add_argument("--artist", default="", help="Künstler-Name (optional)")
     parser.add_argument("--title", default="", help="Song-Titel (optional)")
     parser.add_argument("--output_dir", default="./output", help="Ausgabeordner")
-    parser.add_argument("--pitch-engine", choices=["pyin", "crepe"], default="pyin",
-                        help="Tonhöhen-Algorithmus (pyin = blitzschnell 3s, crepe = neural)")
-    parser.add_argument("--crepe-model", choices=["full", "tiny"], default="tiny",
+    parser.add_argument("--pitch-engine", choices=["fcpe", "crepe", "pyin", "rmvpe"], default="fcpe",
+                        help="Tonhöhen-Algorithmus (fcpe = neural singing, crepe = neural, pyin = fallback)")
+    parser.add_argument("--crepe-model", choices=["full", "tiny"], default="full",
                         help="CREPE Modell-Größe")
+    parser.add_argument("--separator", choices=["demucs", "roformer"], default="demucs",
+                        help="Stimmtrennungs-Modell (demucs, roformer)")
+    parser.add_argument("--use-basic-pitch", action="store_true", default=False,
+                        help="Basic Pitch als Zweitmeinung für Melisma-Splits & Oktav-Tiebreaker aktivieren")
     parser.add_argument("--key", default="", help="Musikalische Tonart (z.B. 'Eb', 'Cm', 'F', optional)")
     parser.add_argument("--vocal-range", choices=["auto", "female", "male"], default="auto",
                         help="Gesangsbereich (auto, female, male)")
@@ -110,6 +121,8 @@ def main():
         output_dir=args.output_dir,
         pitch_engine=args.pitch_engine,
         crepe_model=args.crepe_model,
+        separator=args.separator,
+        use_basic_pitch=args.use_basic_pitch,
         key=args.key,
         vocal_range=args.vocal_range,
         lyrics_json=args.lyrics_json,

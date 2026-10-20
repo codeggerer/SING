@@ -1,18 +1,24 @@
 """
-Note building, melisma processing, and tessitura/scale adaptation.
+Note building, melisma processing, and tessitura/scale adaptation (PLAN.md Phase 5).
 """
 
 from __future__ import annotations
 from typing import List, Dict, Any, Optional, Set
 import numpy as np
 
-from karaoke.pitch import get_syllable_pitch, detect_melisma_pitches, snap_pitch_to_scale
+from karaoke.pitch import (
+    get_syllable_pitch,
+    detect_syllable_split,
+    soft_snap_to_scale,
+    snap_pitch_to_scale,
+)
 from karaoke.config import (
     BEAT_DUR_SEC,
     PAUSE_BREAK_THRESHOLD_SEC,
     LINE_MAX_WORDS,
-    SUBHARMONIC_P75_THRESHOLD,
-    SUBHARMONIC_NOTE_THRESHOLD,
+    SONG_MEDIAN_MIN_MIDI,
+    SONG_MEDIAN_MAX_MIDI,
+    KEY_MIN_CONFIDENCE_FOR_SNAP,
 )
 
 
@@ -25,26 +31,29 @@ def build_word_notes(
     words: List[Dict[str, Any]],
     pitch_data: Dict[str, Any],
     lang: str = "de",
+    basic_pitch_notes: Optional[List[Dict[str, Any]]] = None,
 ) -> List[Dict[str, Any]]:
     """
     Pass 1: Extracts raw notes and pause beats for each word/syllable.
     Respects:
     - Provider syllables / aligned syllables
-    - Phrase line breaks from providers or silence >= 0.6s / 8 words (Task 6)
-    - Minimum duration 30ms (Task 4)
+    - Phrase line breaks from providers or silence >= 0.6s / 8 words
+    - Minimum duration 30ms
+    - Change-point step detector for melisma (Fix for P2: dur >= 500ms, plateaus >= 150ms, diff >= 2st)
+    - Unvoiced syllable pitch inheritance from neighbor in same phrase
     """
     word_notes_list = []
-    prev_pitch = 60
+    prev_pitch_float = 60.0
     words_in_current_phrase = 0
 
     for i, w in enumerate(words):
         w_start = float(w["start"])
-        # Remove arbitrary clamps (Task 4): minimum 30ms duration
+        # Minimum 30ms duration
         w_end = max(float(w["end"]), w_start + 0.030)
         raw_word = w["word"]
         w_dur = w_end - w_start
 
-        # Check line break conditions (Task 6)
+        # Check line break conditions
         pause_beat = None
         if i > 0:
             prev_end = float(words[i-1]["end"])
@@ -59,14 +68,35 @@ def build_word_notes(
         words_in_current_phrase += 1
 
         is_already_syllable = w.get("is_syllable", False)
+        has_tilde_marker = "~" in raw_word or raw_word.endswith("-")
+
         if is_already_syllable:
-            s_pitch = get_syllable_pitch(pitch_data, w_start, w_end, fallback_pitch=prev_pitch)
-            prev_pitch = s_pitch
-            raw_notes = [{"start": w_start, "end": w_end, "pitch": s_pitch, "text": raw_word}]
+            # Check for deliberate melisma split on long syllables (>= 500ms)
+            melisma = detect_syllable_split(
+                pitch_data,
+                w_start,
+                w_end,
+                basic_pitch_notes=basic_pitch_notes,
+                has_tilde=has_tilde_marker,
+                fallback_pitch=prev_pitch_float,
+            )
+            if melisma:
+                (t0, t1, pf1, pi1), (t2, t3, pf2, pi2) = melisma[0], melisma[1]
+                prev_pitch_float = pf2
+                clean_text = raw_word.rstrip('~').rstrip('-').rstrip(' ')
+                raw_notes = [
+                    {"start": t0, "end": t1, "pitch": pi1, "pitch_float": pf1, "text": f"{clean_text}-"},
+                    {"start": t2, "end": t3, "pitch": pi2, "pitch_float": pf2, "text": "~ "},
+                ]
+            else:
+                s_float, s_pitch = get_syllable_pitch(pitch_data, w_start, w_end, fallback_pitch=prev_pitch_float, return_float=True)
+                prev_pitch_float = s_float
+                raw_notes = [{"start": w_start, "end": w_end, "pitch": s_pitch, "pitch_float": s_float, "text": raw_word}]
+
             word_notes_list.append({"pause_beat": pause_beat, "notes": raw_notes, "num_sylls": 1})
             continue
 
-        # Derived syllables via Task 2 vowel nucleus distribution
+        # Derived syllables via vowel nucleus distribution
         from karaoke.align import distribute_word_syllables
         syll_dicts = distribute_word_syllables(
             raw_word,
@@ -79,48 +109,91 @@ def build_word_notes(
         raw_notes = []
 
         if num_sylls == 1:
-            melisma = detect_melisma_pitches(pitch_data, w_start, w_end)
+            melisma = detect_syllable_split(
+                pitch_data,
+                w_start,
+                w_end,
+                basic_pitch_notes=basic_pitch_notes,
+                has_tilde=has_tilde_marker,
+                fallback_pitch=prev_pitch_float,
+            )
             if melisma:
-                (t0, t1, p1), (t2, t3, p2) = melisma[0], melisma[1]
-                raw_notes.append({"start": t0, "end": t1, "pitch": p1, "text": f"{syll_dicts[0]['word'].strip()}-"})
-                raw_notes.append({"start": t2, "end": t3, "pitch": p2, "text": "~ "})
+                (t0, t1, pf1, pi1), (t2, t3, pf2, pi2) = melisma[0], melisma[1]
+                prev_pitch_float = pf2
+                clean_text = syll_dicts[0]['word'].strip().rstrip('-').rstrip('~')
+                raw_notes.append({"start": t0, "end": t1, "pitch": pi1, "pitch_float": pf1, "text": f"{clean_text}-"})
+                raw_notes.append({"start": t2, "end": t3, "pitch": pi2, "pitch_float": pf2, "text": "~ "})
             else:
-                p = get_syllable_pitch(pitch_data, w_start, w_end, fallback_pitch=prev_pitch)
-                raw_notes.append({"start": w_start, "end": w_end, "pitch": p, "text": syll_dicts[0]["word"]})
+                p_float, p_int = get_syllable_pitch(pitch_data, w_start, w_end, fallback_pitch=prev_pitch_float, return_float=True)
+                prev_pitch_float = p_float
+                raw_notes.append({"start": w_start, "end": w_end, "pitch": p_int, "pitch_float": p_float, "text": syll_dicts[0]["word"]})
         else:
             for s_idx, s_info in enumerate(syll_dicts):
                 s_s = s_info["start"]
                 s_e = s_info["end"]
-                s_pitch = get_syllable_pitch(pitch_data, s_s, s_e, fallback_pitch=prev_pitch)
-                prev_pitch = s_pitch
-                raw_notes.append({"start": s_s, "end": s_e, "pitch": s_pitch, "text": s_info["word"]})
+                s_float, s_pitch = get_syllable_pitch(pitch_data, s_s, s_e, fallback_pitch=prev_pitch_float, return_float=True)
+                prev_pitch_float = s_float
+                raw_notes.append({"start": s_s, "end": s_e, "pitch": s_pitch, "pitch_float": s_float, "text": s_info["word"]})
 
         word_notes_list.append({"pause_beat": pause_beat, "notes": raw_notes, "num_sylls": num_sylls})
 
     return word_notes_list
 
 
+def apply_global_octave_tessitura(word_notes_list: List[Dict[str, Any]]) -> None:
+    """
+    PLAN.md Phase 5.5: Delete the p75 >= 64 -> +12 hack.
+    Octave handling now lives in contour continuity repair (clean_f0).
+    As a last global check: if median MIDI of the whole song is < 45 or > 84,
+    shift by whole octaves.
+    """
+    all_raw_pitches = [
+        n["pitch"] for wn in word_notes_list
+        for n in wn["notes"]
+        if n.get("pitch") is not None and not np.isnan(n["pitch"]) and n["pitch"] > 0
+    ]
+    if not all_raw_pitches:
+        return
+
+    med = float(np.median(all_raw_pitches))
+    shift = 0
+    while med + shift < SONG_MEDIAN_MIN_MIDI:
+        shift += 12
+    while med + shift > SONG_MEDIAN_MAX_MIDI:
+        shift -= 12
+
+    if shift != 0:
+        print(f"🌍 Globale Gesangslagen-Verschiebung: Median {med:.1f} um {shift:+d} Halbtöne angepasst.")
+        for wn in word_notes_list:
+            for n in wn["notes"]:
+                if n.get("pitch") is not None and not np.isnan(n["pitch"]) and n["pitch"] > 0:
+                    n["pitch"] += shift
+                    if "pitch_float" in n:
+                        n["pitch_float"] += shift
+
+
 def apply_subharmonic_recovery(word_notes_list: List[Dict[str, Any]]):
     """
-    Pass 2: Global Tessitura Analysis & Subharmonic Octave Recovery.
+    Backward-compatible alias for apply_global_octave_tessitura.
     """
-    all_raw_pitches = [n["pitch"] for wn in word_notes_list for n in wn["notes"] if n["pitch"] > 0]
-    if all_raw_pitches:
-        p75 = np.percentile(all_raw_pitches, 75)
-        if p75 >= SUBHARMONIC_P75_THRESHOLD:
-            print(f"🎯 Gesangslage erkannt: Hohe Stimmlage (75. Perzentil: {p75:.1f}). Korrigiere Subharmonische (+12 st)...")
-            for wn in word_notes_list:
-                for n in wn["notes"]:
-                    if n["pitch"] <= SUBHARMONIC_NOTE_THRESHOLD:
-                        n["pitch"] += 12
+    apply_global_octave_tessitura(word_notes_list)
 
 
-def apply_scale_snapping(word_notes_list: List[Dict[str, Any]], scale_pcs: Set[int]):
+def apply_scale_snapping(
+    word_notes_list: List[Dict[str, Any]],
+    scale_pcs: Set[int],
+    confidence: float = 1.0,
+):
     """
-    Pass 3: Scale Snapping (In-Key Tuning).
+    Pass 3: Soft Scale Snapping (PLAN.md Phase 5.5).
+    Replaces hard snapping:
+    - No snap when confidence < 0.60
+    - Snaps only if |pitch_float - nearest_scale_tone| <= 0.35 st
     """
     if not scale_pcs:
         return
+
     for wn in word_notes_list:
         for n in wn["notes"]:
-            n["pitch"] = snap_pitch_to_scale(n["pitch"], scale_pcs)
+            p_float = n.get("pitch_float", float(n["pitch"]))
+            n["pitch"] = soft_snap_to_scale(p_float, scale_pcs, confidence=confidence)

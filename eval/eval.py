@@ -52,7 +52,9 @@ def get_git_sha() -> str:
 def run_pipeline_on_song(
     audio_path: Path,
     output_dir: Path,
-    pitch_engine: str = "pyin",
+    pitch_engine: str = "fcpe",
+    separator: str = "demucs",
+    use_basic_pitch: bool = False,
     inject_truth_chart: Optional[UltraStarChart] = None,
     lyrics_json_path: Optional[Path] = None,
 ) -> Path:
@@ -67,15 +69,23 @@ def run_pipeline_on_song(
     from lyrics_providers import LyricsDoc
 
     # Step 1: Vocal separation (cached if already present)
-    vocals_file, instrumental_file = gk.separate_stems(audio_path, output_dir=output_dir)
+    vocals_file, instrumental_file = gk.separate_stems(audio_path, output_dir=output_dir, separator=separator)
 
     # Step 2: Pitch tracking
     pitch_data = gk.analyze_vocal_pitch(vocals_file, pitch_engine=pitch_engine)
 
     # Step 3: Key detection
     key_info = gk.detect_song_key(
-        instrumental_file if instrumental_file.exists() else audio_path
+        instrumental_file if instrumental_file.exists() else audio_path,
+        vocal_path=vocals_file,
     )
+
+    # Optional Basic Pitch note prediction
+    bp_notes = None
+    if use_basic_pitch:
+        bp_adapter = gk.BasicPitchAdapter()
+        if bp_adapter.is_available:
+            bp_notes = bp_adapter.predict_notes(vocals_file)
 
     output_txt = output_dir / f"{audio_path.stem}.txt"
 
@@ -99,6 +109,7 @@ def run_pipeline_on_song(
             output_txt,
             lang=lang,
             key_info=key_info,
+            basic_pitch_notes=bp_notes,
         )
     elif lyrics_json_path and lyrics_json_path.exists():
         # Phase 2 & 4: Canonical lyrics doc with MMS forced alignment & audio snapping
@@ -122,6 +133,7 @@ def run_pipeline_on_song(
             output_txt,
             lang=lang,
             key_info=key_info,
+            basic_pitch_notes=bp_notes,
         )
     else:
         # Full fallback: Whisper transcription + Phase 4 MMS forced alignment
@@ -135,6 +147,7 @@ def run_pipeline_on_song(
             output_txt,
             lang=detected_lang,
             key_info=key_info,
+            basic_pitch_notes=bp_notes,
         )
 
     return output_txt
@@ -164,7 +177,9 @@ def evaluate_corpus(
     corpus_dir: Path = Path("eval/corpus"),
     results_dir: Path = Path("eval/results"),
     save_as: Optional[str] = None,
-    pitch_engine: str = "pyin",
+    pitch_engine: str = "fcpe",
+    separator: str = "demucs",
+    use_basic_pitch: bool = False,
     inject_truth_lyrics: bool = False,
     force: bool = False,
     use_lyrics_doc: bool = True,
@@ -193,7 +208,8 @@ def evaluate_corpus(
         print(f"⚠️  No corpus songs matching pattern '{songs_pattern}' found in {corpus_dir}")
         return {}
 
-    print(f"\n🎯 Running evaluation [stage: {stage}, pitch_engine: {pitch_engine}] on {len(matched_dirs)} song(s)...\n")
+    bp_flag = " + BasicPitch" if use_basic_pitch else ""
+    print(f"\n🎯 Running evaluation [stage: {stage}, pitch_engine: {pitch_engine}{bp_flag}, separator: {separator}] on {len(matched_dirs)} song(s)...\n")
 
     results_by_song: Dict[str, Any] = {}
     table_rows: List[List[str]] = []
@@ -210,7 +226,7 @@ def evaluate_corpus(
 
         t0 = time.time()
         # Run generation if needed
-        if force or not gen_txt_path.exists() or inject_truth_lyrics:
+        if force or not gen_txt_path.exists() or inject_truth_lyrics or stage == "pitch":
             print(f"▶ Generating chart for {slug}...")
             inject_chart = truth_chart if (inject_truth_lyrics or stage == "pitch") else None
             lyrics_json = (d / "lyrics.json") if (use_lyrics_doc and (d / "lyrics.json").exists()) else None
@@ -219,6 +235,8 @@ def evaluate_corpus(
                     audio_path,
                     out_gen_dir,
                     pitch_engine=pitch_engine,
+                    separator=separator,
+                    use_basic_pitch=use_basic_pitch,
                     inject_truth_chart=inject_chart,
                     lyrics_json_path=lyrics_json,
                 )
@@ -377,9 +395,20 @@ def main():
     )
     parser.add_argument(
         "--pitch-engine",
-        choices=["pyin", "crepe"],
-        default="pyin",
-        help="Pitch engine to test (default: pyin)",
+        choices=["fcpe", "crepe", "pyin", "rmvpe"],
+        default="fcpe",
+        help="Pitch engine to test (default: fcpe)",
+    )
+    parser.add_argument(
+        "--separator",
+        choices=["demucs", "roformer"],
+        default="demucs",
+        help="Separator model (default: demucs)",
+    )
+    parser.add_argument(
+        "--use-basic-pitch",
+        action="store_true",
+        help="Enable Basic Pitch second opinion for melisma splits and octave tie-breaking",
     )
     parser.add_argument(
         "--inject-truth-lyrics",
@@ -405,6 +434,8 @@ def main():
         results_dir=Path(args.results_dir),
         save_as=args.save_as,
         pitch_engine=args.pitch_engine,
+        separator=args.separator,
+        use_basic_pitch=args.use_basic_pitch,
         inject_truth_lyrics=args.inject_truth_lyrics,
         force=args.force,
         use_lyrics_doc=not args.no_lyrics,
