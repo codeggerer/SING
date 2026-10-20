@@ -102,6 +102,10 @@ def estimate_audio_offset(vocal_path: Path, doc: LyricsDoc, max_lag_sec: float =
         best_lag_frames = (valid_start + best_idx) - zero_lag
         best_lag_sec = best_lag_frames * 0.020
 
+        # Compensate for vowel nucleus energy delay relative to consonant onset (~220ms)
+        if best_lag_sec > 0.3:
+            best_lag_sec = max(0.0, best_lag_sec - 0.22)
+
         return float(round(best_lag_sec, 3))
     except Exception as e:
         return 0.0

@@ -143,14 +143,16 @@ class LyricsDoc:
                         "is_syllable": True,
                     })
             else:
-                # Line-synced: distribute line text across words
+                # Line-synced: distribute line text across words within realistic phrase duration
                 line_words = [w for w in line.words.split() if w.strip()]
                 if not line_words:
                     continue
                 line_start = max(0.0, line.start + offset)
-                line_end = max(line_start + 0.5, line.end + offset)
-                total_dur = line_end - line_start
-                dur_per_word = total_dur / len(line_words)
+                raw_dur = max(0.5, line.end - line.start)
+                # Cap phrase duration so words are not stretched over instrumental gaps
+                est_dur = max(1.5, min(len(line_words) * 0.42 + 0.5, 6.0))
+                line_dur = min(raw_dur, est_dur)
+                dur_per_word = line_dur / len(line_words)
 
                 for w_idx, w in enumerate(line_words):
                     w_start = line_start + w_idx * dur_per_word
