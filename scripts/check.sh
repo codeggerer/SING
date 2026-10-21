@@ -21,6 +21,12 @@ echo ""
 echo "─── [1/3] JavaScript Engine & Gateway Unit Tests ───"
 node tests/resolver_test.js
 node tests/jobs_test.js
+node tests/settings_test.js
+node tests/stem_mixer_test.js
+node tests/pitch_tracking_test.js
+node tests/highway_rendering_test.js
+node tests/calibration_test.js
+node tests/robustness_test.js
 node tests/engine_test.js
 
 # 2. Python Unit Tests

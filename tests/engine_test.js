@@ -18,21 +18,37 @@ function getMedian(arr) {
   return s.length % 2 !== 0 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
 }
 
-// 2. MPM Pitch Detection (McLeod Pitch Method)
+// 2. MPM Pitch Detection (McLeod Pitch Method with Hann Windowing)
+let hannWindowCache = null;
+let hannWindowCacheN = 0;
+
+function getHannWindow(N) {
+  if (hannWindowCache && hannWindowCacheN === N) return hannWindowCache;
+  const w = new Float32Array(N);
+  for (let i = 0; i < N; i++) {
+    w[i] = 0.5 * (1 - Math.cos((2 * Math.PI * i) / N));
+  }
+  hannWindowCache = w;
+  hannWindowCacheN = N;
+  return w;
+}
+
 function detectPitchMPM(buffer, sampleRate) {
   const N = Math.min(buffer.length, 1536);
   const minLag = Math.floor(sampleRate / 1000);
   const maxLag = Math.min(N - 2, Math.floor(sampleRate / 78));
+  const win = getHannWindow(N);
 
   const nsdf = new Float32Array(maxLag + 1);
   for (let tau = minLag; tau <= maxLag; tau++) {
     let acf = 0;
     let divisor = 0;
     for (let i = 0; i < N - tau; i++) {
+      const w = win[i];
       const a = buffer[i];
       const b = buffer[i + tau];
-      acf += a * b;
-      divisor += a * a + b * b;
+      acf += w * a * b;
+      divisor += w * (a * a + b * b);
     }
     nsdf[tau] = divisor > 0 ? (2 * acf) / divisor : 0;
   }
@@ -100,16 +116,18 @@ function detectPitchMPM(buffer, sampleRate) {
   };
 }
 
-// 3. Octave Folding
+// 3. Octave Folding (Singer-Register Anchored)
 function foldMidiToTarget(rawMidi, targetMidi, prevDisplayMidi = null) {
-  let signedDiff = ((((rawMidi - targetMidi) % 12) + 18) % 12) - 6;
-  let candidate = targetMidi + signedDiff;
-
-  if (prevDisplayMidi !== null) {
-    if (candidate - prevDisplayMidi > 7.5) candidate -= 12;
-    else if (prevDisplayMidi - candidate > 7.5) candidate += 12;
+  if (prevDisplayMidi !== null && Number.isFinite(prevDisplayMidi)) {
+    const establishedShift = Math.round((prevDisplayMidi - rawMidi) / 12) * 12;
+    let candidate = rawMidi + establishedShift;
+    const diff = candidate - prevDisplayMidi;
+    if (diff > 7.5) candidate -= 12;
+    else if (diff < -7.5) candidate += 12;
+    return candidate;
   }
-  return candidate;
+  const shift = Math.round((targetMidi - rawMidi) / 12) * 12;
+  return rawMidi + shift;
 }
 
 // 4. UltraStar Parser
@@ -489,6 +507,10 @@ E
   const foldedFemale = foldMidiToTarget(72, 60, null);
   assert(foldedFemale === 60, `Female C5 (72) singing C4 (60) folds to C4 (60) (got ${foldedFemale})`);
 
+  // Target jumps from C4 (60) to G4 (67) while male singer holds steady A2 (45)
+  const foldedTargetJump = foldMidiToTarget(45, 67, foldedMale);
+  assert(foldedTargetJump === 57, `Target note jump (60 -> 67) preserves singer register without pitch jerk (got ${foldedTargetJump})`);
+
   // TEST SUITE 5: Studio vs Video Offset Calculation
   console.log('\n--- Test Suite 5: Studio Offset Alignment Engine ---');
   const sampleUltraLines = [
@@ -542,7 +564,8 @@ E
     });
   }
 
-  const indexRes = await httpGetText('http://127.0.0.1:3000/index.html');
+  const port = process.env.PORT || 3333;
+  const indexRes = await httpGetText(`http://127.0.0.1:${port}/index.html`);
   if (indexRes.status === 200) {
     assert(indexRes.text.includes('id="pitchCanvas"'), 'index.html contains pitchCanvas');
     assert(indexRes.text.includes('id="btnModeSpotify"'), 'index.html contains Spotify mode button');
@@ -551,13 +574,13 @@ E
     console.log(`  (Note: Live server test skipped or unaccessible via loopback: ${indexRes.error || indexRes.status})`);
   }
 
-  const ytRes = await httpGetJson('http://127.0.0.1:3000/api/youtube?q=Queen+Dont+Stop+Me+Now&duration=210');
+  const ytRes = await httpGetJson(`http://127.0.0.1:${port}/api/youtube?q=Queen+Dont+Stop+Me+Now&duration=210`);
   if (ytRes.status === 200 && ytRes.data?.videos) {
     assert(Array.isArray(ytRes.data.videos) && ytRes.data.videos.length > 0, `YouTube API returned ${ytRes.data.videos.length} embeddable videos`);
     assert(ytRes.data.videos[0].videoId.length === 11, `First video has valid 11-char ID (${ytRes.data.videos[0].videoId}: ${ytRes.data.videos[0].title})`);
   }
 
-  const searchRes = await httpGetJson('http://127.0.0.1:3000/api/search?q=Queen');
+  const searchRes = await httpGetJson(`http://127.0.0.1:${port}/api/search?q=Queen`);
   if (searchRes.status === 200 && searchRes.data?.results) {
     assert(Array.isArray(searchRes.data.results), `Search API returned ${searchRes.data.results.length} songs`);
   }

@@ -18,9 +18,9 @@ const {
   registerJobSse,
   JOBS_DIR,
 } = require('./lib/jobs');
-const { listLibrarySongs, serveSongFile, updateSongChart, SONGS_DIR } = require('./lib/library');
+const { listLibrarySongs, serveSongFile, updateSongChart, deleteSong, SONGS_DIR } = require('./lib/library');
 
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 3333;
 const PUBLIC_DIR = path.join(__dirname, 'public');
 
 function fetchUrl(targetUrl, headers = {}) {
@@ -553,7 +553,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     // Resolver Endpoint (Phase 6.1)
-    if (pathname === '/api/resolve') {
+    if (pathname === '/api/resolve' || pathname === '/api/resolve/') {
       let input = '';
       if (req.method === 'POST') {
         const data = await readRequestBody(req);
@@ -582,6 +582,20 @@ const server = http.createServer(async (req, res) => {
       const songs = listLibrarySongs();
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       return res.end(JSON.stringify({ songs }));
+    }
+
+    // Delete Song from Library (supports DELETE /api/library/:slug and POST /api/library/:slug/delete)
+    const libraryDeleteMatch = pathname.match(/^\/api\/library\/([a-zA-Z0-9_-]+)(?:\/delete)?$/);
+    if (libraryDeleteMatch && (req.method === 'DELETE' || req.method === 'POST')) {
+      const slug = libraryDeleteMatch[1];
+      try {
+        const result = deleteSong(slug);
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        return res.end(JSON.stringify(result));
+      } catch (err) {
+        res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+        return res.end(JSON.stringify({ error: err.message }));
+      }
     }
 
     // Chart Editor API: Save & Read Chart (Phase 7.1)
@@ -658,7 +672,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     // Job Management Endpoints (Phase 6.3)
-    if (pathname === '/api/jobs' && req.method === 'POST') {
+    if ((pathname === '/api/jobs' || pathname === '/api/jobs/') && req.method === 'POST') {
       const data = await readRequestBody(req);
       if (!data.resolved || (!data.resolved.title && !data.resolved.slug)) {
         res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -676,6 +690,11 @@ const server = http.createServer(async (req, res) => {
           result: job.result,
         })
       );
+    }
+
+    if ((pathname === '/api/jobs' || pathname === '/api/jobs/') && req.method === 'GET') {
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      return res.end(JSON.stringify({ status: 'ok', active: true }));
     }
 
     const jobEventsMatch = pathname.match(/^\/api\/jobs\/([^\/]+)\/events$/);
@@ -823,6 +842,12 @@ const server = http.createServer(async (req, res) => {
       return res.end(JSON.stringify({ videos: combined }));
     }
 
+    // Return JSON 404 for any unmatched /api routes
+    if (pathname.startsWith('/api/')) {
+      res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
+      return res.end(JSON.stringify({ error: `API route not found: ${pathname}` }));
+    }
+
     // Serve static files
     let filePath = pathname === '/' ? path.join(PUBLIC_DIR, 'index.html') : path.join(PUBLIC_DIR, pathname);
     if (!filePath.startsWith(PUBLIC_DIR)) {
@@ -848,8 +873,8 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(PORT, () => {
   const health = checkSystemHealth();
-  console.log(`🎤 Sing Web-App Server läuft auf http://localhost:${PORT}`);
-  console.log(`   * yt-dlp: ${health.ytDlpAvailable ? '✓ ' + health.ytDlpPath : '✗ nicht gefunden'}`);
-  console.log(`   * ffmpeg: ${health.ffmpegAvailable ? '✓ ' + health.ffmpegPath : '✗ nicht gefunden'}`);
-  console.log(`   * Python venv: ${health.pythonVenvAvailable ? '✓ bereit' : '✗ venv nicht gefunden'}`);
+  console.log(`🎤 Sing Karaoke Studio running at http://localhost:${PORT}`);
+  console.log(`   * yt-dlp: ${health.ytDlpAvailable ? '✓ ' + health.ytDlpPath : '✗ not found'}`);
+  console.log(`   * ffmpeg: ${health.ffmpegAvailable ? '✓ ' + health.ffmpegPath : '✗ not found'}`);
+  console.log(`   * Python venv: ${health.pythonVenvAvailable ? '✓ ready' : '✗ venv not found'}`);
 });

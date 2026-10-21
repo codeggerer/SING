@@ -46,4 +46,4 @@ The official Spicy Lyrics API documentation at `developers.spicylyrics.org` was 
      - `Background`: array of background vocal tracks, each with its own `Syllables` array.
      - `IsPartOfWord`: boolean flag indicating whether the syllable attaches directly to the following syllable (corresponds to `joinNext: true` in `LyricsDoc`).
 3. **Fixture Saved**:
-   - A verified real payload for Queen's *Don't Stop Me Now* (`5T8EDUDqKcs6OSOwEsfqG7`) has been saved to [`tests/fixtures/spicylyrics_real_sample.json`](file:///Users/lewin/Desktop/Zeugs/Vibe Coding/Sing/tests/fixtures/spicylyrics_real_sample.json) and is tested in `tests/test_lyrics.js`.
+   - A verified real payload for Queen's *Don't Stop Me Now* (`5T8EDUDqKcs6OSOwEsfqG7`) has been saved to [`tests/fixtures/spicylyrics_real_sample.json`](../tests/fixtures/spicylyrics_real_sample.json) and is tested in `tests/test_lyrics.js`.

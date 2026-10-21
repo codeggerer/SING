@@ -16,6 +16,7 @@ const {
   listLibrarySongs,
   serveSongFile,
   updateSongChart,
+  deleteSong,
 } = require('../lib/library');
 
 console.log('🧪 RUNNING JOBS & LIBRARY TEST SUITE');
@@ -141,9 +142,15 @@ const updatedFound = updatedSongs.find((s) => s.slug === testSlug);
 assert.ok(updatedFound && updatedFound.edited === true, 'Library list should reflect edited status');
 console.log('  ✓ PASS: updateSongChart persists changes and marks meta.json.edited = true');
 
-// Clean up test directory
-try {
-  fs.rmSync(testDir, { recursive: true, force: true });
-} catch (_) {}
+// 7. Delete Song from Library & Disk
+assert.throws(() => deleteSong('../escape'), /Invalid song slug format/);
+assert.throws(() => deleteSong('non-existent-slug-xyz'), /Song directory not found/);
+const deleteResult = deleteSong(testSlug);
+assert.strictEqual(deleteResult.success, true);
+assert.strictEqual(deleteResult.deleted, testSlug);
+assert.strictEqual(fs.existsSync(testDir), false, 'Song directory should be completely removed from disk');
+const songsAfterDelete = listLibrarySongs();
+assert.strictEqual(songsAfterDelete.some((s) => s.slug === testSlug), false, 'Deleted song should not appear in listLibrarySongs');
+console.log('  ✓ PASS: deleteSong removes directory from disk and updates library');
 
 console.log('🎉 ALL JOBS & LIBRARY TESTS PASSED!');

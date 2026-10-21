@@ -82,7 +82,7 @@ When modifying or expanding the codebase, adhere to these architectural rules:
 
 ### Web Server & Tests
 ```bash
-# Start Web Server (serves on http://localhost:3000)
+# Start Web Server (serves on http://localhost:3333)
 node server.js
 
 # Run Complete JavaScript Test Suite (Validates Resolver, Job Queue, Library, and Engine DSP)

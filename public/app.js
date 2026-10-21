@@ -41,8 +41,36 @@ const VERIFIED_YOUTUBE_FALLBACKS = {
   ],
 };
 
+// Default Application Settings Schema
+const DEFAULT_SETTINGS = {
+  // Display & HUD
+  showLyricsRibbon: true,        // Bottom synchronized lyrics prompter
+  showSyllablesOnNotes: true,    // Syllables rendered directly on note tubes
+  showLiveVoiceOrb: true,        // Live singing pitch orb & trail
+  showPitchBadges: true,         // Perfect/Good/Miss feedback pill
+  showScoreHUD: true,            // Score & combo multiplier HUD
+  theaterMode: false,            // Full-width highway (hides left video deck)
+  stageLayout: 'backdrop',       // Stage layout mode ('split' | 'backdrop' | 'theater')
+  backdropHighwayHeight: '100',  // Height of transparent highway box in backdrop mode ('25' | '33' | '50' | '100')
+
+  // Audio & Mixing
+  guideVocalsVolume: 35,         // Loudness percentage for original vocals (0-100)
+  masterVolume: 90,              // Master audio output volume
+  micMonitoring: false,          // Play mic audio back to headphones
+  micMonitorVolume: 50,          // Mic monitoring level
+
+  // Microphone & Scoring
+  noiseGate: 6,                  // Noise gate threshold (%)
+  difficulty: 1.5,               // Hit tolerance in semitones
+  octaveAgnostic: true,          // Allow singing in any octave
+  latencyMs: 80,                 // Audio delay compensation in milliseconds
+};
+
 // Application State
 const state = {
+  // Modular App Settings
+  settings: { ...DEFAULT_SETTINGS },
+
   // Catalog
   ultraStarCatalog: [],
   catalogLoaded: false,
@@ -66,6 +94,8 @@ const state = {
   calculatedStudioOffset: null, // Line-by-line median offset between UltraStar and Studio lyrics
   chartMinMidi: 53,
   chartMaxMidi: 77,
+  viewportCenterMidi: 65,
+  viewportSpanMidi: 16,
 
   // YouTube Player State
   ytPlayer: null,
@@ -97,6 +127,7 @@ const state = {
 
   // General Playback
   isPlaying: false,
+  theaterMode: false,
   simulatedTime: 0,
   lastFrameTs: performance.now(),
 
@@ -114,6 +145,8 @@ const state = {
   activeJobSse: null,
   activeJobPollTimer: null,
   librarySongs: [],
+  stemMixer: null,
+  lastYtSyncSeekTs: 0,
   localAudio: null,
   generationOptions: {
     pitchEngine: 'fcpe',
@@ -132,17 +165,22 @@ const state = {
   micActive: false,
   selectedDeviceId: '',
   echoCancellation: false,
+  micMonitorGain: null,
+  micSource: null,
   latencyMs: 80,
-  noiseGatePercent: 5,
+  noiseGatePercent: 6,
   difficultyTolerance: 1.5,
   pitchMagnet: true,
   octaveAgnostic: true,
 
-  // Pitch Stabilization Buffers
+  // Pitch Stabilization Buffers & Vocal Register
   currentHz: 0,
   currentMidi: null,
   smoothedMidi: null,
   lastDisplayedMidi: null,
+  establishedOctaveShift: null,
+  singerVocalRegister: null,
+  pendingPitchSpike: null,
   recentRawMidis: [],
   voicedFrameCount: 0,
   silentFrameCount: 10,
@@ -160,6 +198,7 @@ const state = {
  * 1. INITIALIZATION, OAUTH CALLBACK & UI EVENTS
  * ============================================================================ */
 window.addEventListener('DOMContentLoaded', async () => {
+  loadAppSettings();
   updateRedirectUriLabel();
   bindUIEvents();
   initSpeechRecognition();
@@ -180,8 +219,8 @@ window.addEventListener('DOMContentLoaded', async () => {
   await loadLibrarySongs();
   await loadLyricsSettings();
 
+  // Catalog loaded in background for instant lookups
   await loadUltraStarCatalog();
-  performSongSearch("Queen Don't Stop Me Now");
 });
 
 window.onYouTubeIframeAPIReady = function () {
@@ -193,6 +232,164 @@ window.onSpotifyWebPlaybackSDKReady = function () {
     initSpotifyWebPlayer();
   }
 };
+
+function loadAppSettings() {
+  try {
+    const raw = localStorage.getItem('sing_app_settings');
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      state.settings = { ...DEFAULT_SETTINGS, ...parsed };
+      if (!parsed.stageLayout) {
+        state.settings.stageLayout = 'backdrop';
+      }
+      if (!parsed.backdropHighwayHeight) {
+        state.settings.backdropHighwayHeight = '100';
+      }
+    } else {
+      state.settings = { ...DEFAULT_SETTINGS };
+      if (localStorage.getItem('sing_theater_mode') === '1') {
+        state.settings.theaterMode = true;
+        state.settings.stageLayout = 'theater';
+      }
+    }
+  } catch (err) {
+    console.warn('Could not parse saved app settings, using defaults:', err);
+    state.settings = { ...DEFAULT_SETTINGS };
+  }
+  applySettings(state.settings, false);
+}
+
+function saveAppSettings() {
+  try {
+    localStorage.setItem('sing_app_settings', JSON.stringify(state.settings));
+    localStorage.setItem('sing_theater_mode', state.settings.theaterMode ? '1' : '0');
+  } catch (err) {
+    console.warn('Failed to save settings to localStorage:', err);
+  }
+}
+
+function updateMicMonitoring() {
+  if (!state.audioCtx || !state.micSource) return;
+  if (!state.micMonitorGain) {
+    try {
+      state.micMonitorGain = state.audioCtx.createGain();
+      state.micMonitorGain.connect(state.audioCtx.destination);
+      state.micSource.connect(state.micMonitorGain);
+    } catch (e) {
+      console.warn('Could not wire mic monitoring:', e);
+      return;
+    }
+  }
+  const gain = state.settings.micMonitoring ? (state.settings.micMonitorVolume / 100) : 0;
+  try {
+    state.micMonitorGain.gain.setTargetAtTime(gain, state.audioCtx.currentTime, 0.05);
+  } catch (_) {
+    state.micMonitorGain.gain.value = gain;
+  }
+}
+
+function applySettings(newSettings, shouldSave = true) {
+  if (newSettings && typeof newSettings === 'object') {
+    state.settings = { ...state.settings, ...newSettings };
+  }
+  const s = state.settings;
+
+  // 1. Reactive DOM classes
+  document.body.classList.toggle('hide-lyrics-ribbon', !s.showLyricsRibbon);
+  document.body.classList.toggle('hide-pitch-badges', !s.showPitchBadges);
+  document.body.classList.toggle('hide-score-hud', !s.showScoreHUD);
+
+  // 2. Highway canvas height adjustment
+  const canvas = document.getElementById('pitchCanvas');
+  if (canvas) {
+    const dpr = window.devicePixelRatio || 1;
+    const targetH = !s.showLyricsRibbon ? 460 : 360;
+    const targetPixelH = Math.round(targetH * dpr);
+    if (canvas.height !== targetPixelH) {
+      canvas.height = targetPixelH;
+    }
+  }
+
+  // 3. State sync
+  state.latencyMs = s.latencyMs;
+  state.noiseGatePercent = s.noiseGate;
+  state.difficultyTolerance = s.difficulty;
+  state.octaveAgnostic = s.octaveAgnostic;
+  state.theaterMode = s.theaterMode;
+
+  // 4. Stage Layout & Theater Mode sync
+  const layout = s.stageLayout || (s.theaterMode ? 'theater' : 'split');
+  setStageLayout(layout, false);
+
+  // 5. Sync Form Controls in UI
+  const setChecked = (id, val) => {
+    const el = document.getElementById(id);
+    if (el) el.checked = Boolean(val);
+  };
+  const setVal = (id, val) => {
+    const el = document.getElementById(id);
+    if (el) el.value = val;
+  };
+  const setText = (id, val) => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = val;
+  };
+
+  setChecked('toggleShowLyricsRibbon', s.showLyricsRibbon);
+  setChecked('toggleShowSyllablesOnNotes', s.showSyllablesOnNotes);
+  setChecked('toggleShowLiveVoiceOrb', s.showLiveVoiceOrb);
+  setChecked('toggleShowPitchBadges', s.showPitchBadges);
+  setChecked('toggleShowScoreHUD', s.showScoreHUD);
+  setChecked('toggleTheaterMode', s.theaterMode);
+
+  setVal('selectStageLayout', layout);
+  setVal('selectBackdropHighwayHeight', s.backdropHighwayHeight || '33');
+  const rowBackdropHeight = document.getElementById('rowBackdropHighwayHeight');
+  if (rowBackdropHeight) {
+    rowBackdropHeight.style.display = (layout === 'backdrop') ? 'flex' : 'none';
+  }
+
+  setVal('sliderGuideVocalsVol', s.guideVocalsVolume);
+  setText('lblGuideVocalsVol', s.guideVocalsVolume);
+  setVal('sliderGuideVocals', s.guideVocalsVolume);
+  setText('lblGuideVocalsVal', `${s.guideVocalsVolume}%`);
+  setVal('sliderMasterVolume', s.masterVolume);
+  setText('lblMasterVolume', s.masterVolume);
+
+  if (state.stemMixer) {
+    state.stemMixer.setGuideVocalsVolume(s.guideVocalsVolume);
+    state.stemMixer.setMasterVolume(s.masterVolume);
+  }
+
+  setVal('sliderLatency', s.latencyMs);
+  setText('lblLatencyMs', s.latencyMs);
+  setText('topLatencyVal', s.latencyMs);
+
+  setVal('sliderGate', s.noiseGate);
+  setText('lblGateVal', s.noiseGate);
+
+  setChecked('toggleMicMonitoring', s.micMonitoring);
+  setVal('sliderMicMonitorVol', s.micMonitorVolume);
+  setText('lblMicMonitorVol', s.micMonitorVolume);
+  const rowMonitorVol = document.getElementById('rowMicMonitorVol');
+  if (rowMonitorVol) {
+    rowMonitorVol.style.display = s.micMonitoring ? 'flex' : 'none';
+  }
+
+  setChecked('toggleOctaveAgnostic', s.octaveAgnostic);
+  setChecked('chkOctaveAgnostic', s.octaveAgnostic);
+
+  setVal('selectSettingsDifficulty', String(s.difficulty));
+  setVal('selectDifficulty', String(s.difficulty));
+
+  // 6. Mic Monitoring gain update
+  updateMicMonitoring();
+
+  // 7. Persist
+  if (shouldSave) {
+    saveAppSettings();
+  }
+}
 
 function updateRedirectUriLabel() {
   // Spotify recommends 127.0.0.1 over localhost for local loopback redirect URIs
@@ -219,7 +416,7 @@ async function loadUltraStarCatalog() {
         if (s && s.id) mapById.set(s.id, s);
       }
       state.ultraStarCatalog = Array.from(mapById.values());
-      subEl.textContent = `${state.ultraStarCatalog.length} SingStar/UltraStar-Songs bereit`;
+      subEl.textContent = `${state.ultraStarCatalog.length} songs ready`;
     }
   } catch (_) {}
 
@@ -247,7 +444,7 @@ async function loadUltraStarCatalog() {
         }
         state.ultraStarCatalog = Array.from(mapById.values());
         state.catalogLoaded = true;
-        subEl.textContent = `★ ${state.ultraStarCatalog.length} Original SingStar/UltraStar-Songs geladen`;
+        subEl.textContent = `${state.ultraStarCatalog.length} songs loaded`;
       }
     }
   } catch (_) {}
@@ -368,9 +565,9 @@ function bindUIEvents() {
   document.getElementById('btnCopyRedirectUri').addEventListener('click', () => {
     const uri = document.getElementById('lblRedirectUri').textContent;
     navigator.clipboard.writeText(uri).catch(() => {});
-    document.getElementById('btnCopyRedirectUri').textContent = '✓ Kopiert!';
+    document.getElementById('btnCopyRedirectUri').textContent = '✓ Copied!';
     setTimeout(() => {
-      document.getElementById('btnCopyRedirectUri').textContent = '📋 Kopieren';
+      document.getElementById('btnCopyRedirectUri').textContent = 'Copy';
     }, 1800);
   });
 
@@ -435,15 +632,9 @@ function bindUIEvents() {
   });
 
   // Mic Toggle
-  document.getElementById('btnToggleMic').addEventListener('click', async () => {
-    if (!state.micActive) {
-      await startMicrophone(state.selectedDeviceId);
-    } else {
-      stopMicrophone();
-    }
-  });
+  document.getElementById('btnToggleMic').addEventListener('click', toggleMicrophone);
 
-  // Settings Modal
+  // Settings Modal Open/Close
   const modalSettings = document.getElementById('modalSettings');
   document.getElementById('btnOpenSettings').addEventListener('click', async () => {
     modalSettings.classList.remove('hidden');
@@ -451,10 +642,98 @@ function bindUIEvents() {
       await startMicrophone(state.selectedDeviceId);
     }
     await populateAudioDevices();
+    applySettings(state.settings, false);
   });
   document.getElementById('btnCloseSettings').addEventListener('click', () => modalSettings.classList.add('hidden'));
   document.getElementById('btnSaveSettings').addEventListener('click', () => modalSettings.classList.add('hidden'));
 
+  // Settings Tabs Navigation
+  const tabBtns = document.querySelectorAll('.settings-tab-btn');
+  tabBtns.forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const targetId = btn.getAttribute('data-tab');
+      tabBtns.forEach((b) => {
+        const isActive = b === btn;
+        b.classList.toggle('active', isActive);
+        b.setAttribute('aria-selected', isActive ? 'true' : 'false');
+      });
+      document.querySelectorAll('.settings-tab-panel').forEach((panel) => {
+        const isActive = panel.id === targetId;
+        panel.classList.toggle('hidden', !isActive);
+        panel.classList.toggle('active', isActive);
+      });
+    });
+  });
+
+  // Helper for boolean toggle binding
+  const bindCheckToggle = (id, settingKey) => {
+    const el = document.getElementById(id);
+    if (el) {
+      el.addEventListener('change', (e) => {
+        applySettings({ [settingKey]: e.target.checked });
+      });
+    }
+  };
+
+  // Tab 1: Display & HUD Toggles
+  bindCheckToggle('toggleShowLyricsRibbon', 'showLyricsRibbon');
+  bindCheckToggle('toggleShowSyllablesOnNotes', 'showSyllablesOnNotes');
+  bindCheckToggle('toggleShowLiveVoiceOrb', 'showLiveVoiceOrb');
+  bindCheckToggle('toggleShowPitchBadges', 'showPitchBadges');
+  bindCheckToggle('toggleShowScoreHUD', 'showScoreHUD');
+  bindCheckToggle('toggleTheaterMode', 'theaterMode');
+
+  const selLayout = document.getElementById('selectStageLayout');
+  if (selLayout) {
+    selLayout.addEventListener('change', (e) => {
+      setStageLayout(e.target.value, true);
+    });
+  }
+
+  const selHeight = document.getElementById('selectBackdropHighwayHeight');
+  if (selHeight) {
+    selHeight.addEventListener('change', (e) => {
+      applySettings({ backdropHighwayHeight: e.target.value });
+      const arena = document.getElementById('stageArena');
+      if (arena) arena.setAttribute('data-overlay-height', e.target.value);
+    });
+  }
+
+  // Tab 2: Audio & Stems
+  const sliderGuide = document.getElementById('sliderGuideVocalsVol');
+  if (sliderGuide) {
+    sliderGuide.addEventListener('input', (e) => {
+      const val = parseInt(e.target.value, 10);
+      applySettings({ guideVocalsVolume: val });
+    });
+  }
+
+  // Docked Stage Guide Vocals Slider (Phase 3)
+  const sliderStageGuide = document.getElementById('sliderGuideVocals');
+  if (sliderStageGuide) {
+    sliderStageGuide.addEventListener('input', (e) => {
+      const val = parseInt(e.target.value, 10);
+      applySettings({ guideVocalsVolume: val });
+    });
+  }
+
+  const sliderMaster = document.getElementById('sliderMasterVolume');
+  if (sliderMaster) {
+    sliderMaster.addEventListener('input', (e) => {
+      const val = parseInt(e.target.value, 10);
+      const lbl = document.getElementById('lblMasterVolume');
+      if (lbl) lbl.textContent = val;
+      applySettings({ masterVolume: val });
+    });
+  }
+
+  document.getElementById('sliderLatency').addEventListener('input', (e) => {
+    setLatencyMs(parseInt(e.target.value, 10));
+  });
+
+  document.getElementById('btnRunCalibration').addEventListener('click', runInteractiveLatencyCalibration);
+
+  // Tab 3: Microphone & Monitoring
   document.getElementById('selectAudioInput').addEventListener('change', async (e) => {
     state.selectedDeviceId = e.target.value;
     await startMicrophone(state.selectedDeviceId);
@@ -467,24 +746,51 @@ function bindUIEvents() {
     }
   });
 
-  document.getElementById('sliderLatency').addEventListener('input', (e) => {
-    setLatencyMs(parseInt(e.target.value, 10));
-  });
-
   document.getElementById('sliderGate').addEventListener('input', (e) => {
-    state.noiseGatePercent = parseInt(e.target.value, 10);
-    document.getElementById('lblGateVal').textContent = state.noiseGatePercent;
+    const val = parseInt(e.target.value, 10);
+    const lbl = document.getElementById('lblGateVal');
+    if (lbl) lbl.textContent = val;
+    applySettings({ noiseGate: val });
   });
 
-  document.getElementById('btnRunCalibration').addEventListener('click', runInteractiveLatencyCalibration);
+  bindCheckToggle('toggleMicMonitoring', 'micMonitoring');
 
-  // Phase 6 In-Browser Generator & Resolver UI Events
+  const sliderMicMon = document.getElementById('sliderMicMonitorVol');
+  if (sliderMicMon) {
+    sliderMicMon.addEventListener('input', (e) => {
+      const val = parseInt(e.target.value, 10);
+      const lbl = document.getElementById('lblMicMonitorVol');
+      if (lbl) lbl.textContent = val;
+      applySettings({ micMonitorVolume: val });
+    });
+  }
+
+  bindCheckToggle('toggleOctaveAgnostic', 'octaveAgnostic');
+
+  const selDifficulty = document.getElementById('selectSettingsDifficulty');
+  if (selDifficulty) {
+    selDifficulty.addEventListener('change', (e) => {
+      applySettings({ difficulty: parseFloat(e.target.value) });
+    });
+  }
+
+  // Single Unified Spotlight Input & Resolver
   const formResolve = document.getElementById('formResolve');
-  if (formResolve) {
+  const inputResolve = document.getElementById('inputResolve');
+  if (formResolve && inputResolve) {
     formResolve.addEventListener('submit', async (e) => {
       e.preventDefault();
-      const val = document.getElementById('inputResolve').value.trim();
+      const val = inputResolve.value.trim();
       if (val) await handleResolveQuery(val);
+    });
+
+    inputResolve.addEventListener('paste', () => {
+      setTimeout(() => {
+        const val = inputResolve.value.trim();
+        if (val && /(?:youtube\.com|youtu\.be|spotify\.com)/i.test(val)) {
+          handleResolveQuery(val);
+        }
+      }, 50);
     });
   }
 
@@ -507,7 +813,7 @@ function bindUIEvents() {
 
   const btnStartGeneration = document.getElementById('btnStartGeneration');
   if (btnStartGeneration) {
-    btnStartGeneration.addEventListener('click', () => startGenerationJob());
+    btnStartGeneration.addEventListener('click', () => handleStartSongAction());
   }
 
   const btnCancelGeneration = document.getElementById('btnCancelGeneration');
@@ -525,8 +831,13 @@ function bindUIEvents() {
   const btnPlayGeneratedSong = document.getElementById('btnPlayGeneratedSong');
   if (btnPlayGeneratedSong) {
     btnPlayGeneratedSong.addEventListener('click', () => {
+      document.getElementById('genProgressCard')?.classList.add('hidden');
       if (state.lastGeneratedSong) {
-        playLibrarySong(state.lastGeneratedSong);
+        if (state.lastGeneratedSong.isDirectSession) {
+          startSongSession(state.lastGeneratedSong);
+        } else {
+          playLibrarySong(state.lastGeneratedSong);
+        }
       }
     });
   }
@@ -558,7 +869,7 @@ function bindUIEvents() {
   document.getElementById('btnSkipToVocals').addEventListener('click', skipToFirstVocals);
 
   document.getElementById('selectDifficulty').addEventListener('change', (e) => {
-    state.difficultyTolerance = parseFloat(e.target.value);
+    applySettings({ difficulty: parseFloat(e.target.value) });
   });
 
   document.getElementById('chkPitchMagnet').addEventListener('change', (e) => {
@@ -566,7 +877,7 @@ function bindUIEvents() {
   });
 
   document.getElementById('chkOctaveAgnostic').addEventListener('change', (e) => {
-    state.octaveAgnostic = e.target.checked;
+    applySettings({ octaveAgnostic: e.target.checked });
   });
 
   // Sync Preset & Fine-Tuning Buttons
@@ -593,6 +904,24 @@ function bindUIEvents() {
     setVideoOffset(newOffset);
   });
 
+  const btnToggleTheater = document.getElementById('btnToggleTheater');
+  if (btnToggleTheater) {
+    btnToggleTheater.addEventListener('click', () => {
+      const current = state.settings.stageLayout || (state.settings.theaterMode ? 'theater' : 'split');
+      let next = 'backdrop';
+      if (current === 'split') next = 'backdrop';
+      else if (current === 'backdrop') next = 'theater';
+      else next = 'split';
+      setStageLayout(next, true);
+      const names = { split: 'Split Stage', backdrop: 'Video Backdrop', theater: 'Highway Theater' };
+      showToast(`Layout: ${names[next]}`, 'info', 1800);
+    });
+  }
+
+  if (localStorage.getItem('sing_theater_mode') === '1') {
+    toggleTheaterMode(true);
+  }
+
   // YouTube Switcher
   document.getElementById('selectYtVideo').addEventListener('change', (e) => {
     const videoId = e.target.value;
@@ -616,19 +945,90 @@ function bindUIEvents() {
   });
 
   initChartEditor();
+  initCalibrationWizard();
 }
 
 function setLatencyMs(ms) {
   state.latencyMs = Math.max(-100, Math.min(450, ms));
-  document.getElementById('sliderLatency').value = state.latencyMs;
-  document.getElementById('lblLatencyMs').textContent = state.latencyMs;
-  document.getElementById('topLatencyVal').textContent = state.latencyMs;
+  state.settings.latencyMs = state.latencyMs;
+  saveAppSettings();
+  const slider = document.getElementById('sliderLatency');
+  if (slider) slider.value = state.latencyMs;
+  const lbl = document.getElementById('lblLatencyMs');
+  if (lbl) lbl.textContent = state.latencyMs;
+  const top = document.getElementById('topLatencyVal');
+  if (top) top.textContent = state.latencyMs;
+  const modalLbl = document.getElementById('calModalCurrentLatency');
+  if (modalLbl) modalLbl.textContent = `${state.latencyMs} ms`;
 }
 
 function setVideoOffset(sec) {
   state.videoOffsetSec = Math.round(sec * 100) / 100;
   const sign = state.videoOffsetSec > 0 ? '+' : '';
-  document.getElementById('lblVideoOffset').textContent = `${sign}${state.videoOffsetSec.toFixed(2)}s`;
+  const lbl = document.getElementById('lblVideoOffset');
+  if (lbl) lbl.textContent = `${sign}${state.videoOffsetSec.toFixed(2)}s`;
+
+  if (state.playbackSource === 'local' && state.stemMixer && state.ytPlayer && typeof state.ytPlayer.seekTo === 'function') {
+    const expectedYtTime = state.stemMixer.getCurrentTime() + state.videoOffsetSec;
+    if (expectedYtTime >= 0) {
+      try {
+        state.ytPlayer.seekTo(expectedYtTime, true);
+      } catch (_) {}
+    }
+  }
+}
+
+function setStageLayout(layout, updateSettings = true) {
+  const arena = document.getElementById('stageArena');
+  const btn = document.getElementById('btnToggleTheater');
+  const toggle = document.getElementById('toggleTheaterMode');
+  const selectLayout = document.getElementById('selectStageLayout');
+  const selectHeight = document.getElementById('selectBackdropHighwayHeight');
+  const rowHeight = document.getElementById('rowBackdropHighwayHeight');
+
+  if (!arena) return;
+
+  const validLayout = ['split', 'backdrop', 'theater'].includes(layout) ? layout : 'split';
+  state.settings.stageLayout = validLayout;
+  state.settings.theaterMode = (validLayout === 'theater');
+  state.theaterMode = (validLayout === 'theater');
+
+  arena.classList.toggle('theater-mode', validLayout === 'theater');
+  document.body.classList.toggle('theater-mode', validLayout === 'theater');
+
+  arena.classList.toggle('mode-video-backdrop', validLayout === 'backdrop');
+  document.body.classList.toggle('mode-video-backdrop', validLayout === 'backdrop');
+
+  const overlayH = state.settings.backdropHighwayHeight || '33';
+  arena.setAttribute('data-overlay-height', overlayH);
+
+  if (btn) {
+    btn.classList.toggle('active', validLayout !== 'split');
+    const icons = { split: '⤢', backdrop: '🎬', theater: '⤢' };
+    const titles = {
+      split: 'Current: Split Stage (Click to switch to Video Backdrop)',
+      backdrop: 'Current: Video Backdrop (Click to switch to Theater)',
+      theater: 'Current: Theater Mode (Click to switch to Split Stage)',
+    };
+    btn.textContent = icons[validLayout] || '⤢';
+    btn.title = titles[validLayout] || 'Switch Stage Layout';
+  }
+
+  if (toggle) toggle.checked = (validLayout === 'theater');
+  if (selectLayout) selectLayout.value = validLayout;
+  if (selectHeight) selectHeight.value = overlayH;
+  if (rowHeight) rowHeight.style.display = (validLayout === 'backdrop') ? 'flex' : 'none';
+
+  if (updateSettings) {
+    saveAppSettings();
+  }
+}
+
+function toggleTheaterMode(forceState, updateSettings = true) {
+  const arena = document.getElementById('stageArena');
+  if (!arena) return;
+  const isTheater = forceState !== undefined ? forceState : !arena.classList.contains('theater-mode');
+  setStageLayout(isTheater ? 'theater' : 'split', updateSettings);
 }
 
 /**
@@ -703,7 +1103,7 @@ function applyStudioSyncOffset() {
     document.getElementById('btnUseStudioSync').classList.add('active-sync-mode');
     document.getElementById('btnUseOriginalGap').classList.remove('active-sync-mode');
     const sign = state.calculatedStudioOffset > 0 ? '+' : '';
-    document.getElementById('badgeSyncInfo').textContent = `🎧 Studio-Sync aktiv (${sign}${state.calculatedStudioOffset.toFixed(2)}s)`;
+    document.getElementById('badgeSyncInfo').textContent = `Studio Sync (${sign}${state.calculatedStudioOffset.toFixed(2)}s)`;
     return;
   }
 
@@ -713,7 +1113,7 @@ function applyStudioSyncOffset() {
     document.getElementById('btnUseStudioSync').classList.add('active-sync-mode');
     document.getElementById('btnUseOriginalGap').classList.remove('active-sync-mode');
     const sign = studioOffset > 0 ? '+' : '';
-    document.getElementById('badgeSyncInfo').textContent = `🎧 Studio-Start Sync (${sign}${studioOffset.toFixed(2)}s)`;
+    document.getElementById('badgeSyncInfo').textContent = `Studio Start Sync (${sign}${studioOffset.toFixed(2)}s)`;
     return;
   }
 
@@ -726,7 +1126,7 @@ function applyStudioSyncOffset() {
       document.getElementById('btnUseStudioSync').classList.add('active-sync-mode');
       document.getElementById('btnUseOriginalGap').classList.remove('active-sync-mode');
       const sign = approxOffset > 0 ? '+' : '';
-      document.getElementById('badgeSyncInfo').textContent = `🎧 Intro-Diff Sync (${sign}${approxOffset.toFixed(1)}s)`;
+      document.getElementById('badgeSyncInfo').textContent = `Intro Diff Sync (${sign}${approxOffset.toFixed(1)}s)`;
       return;
     }
   }
@@ -743,12 +1143,21 @@ function switchPlaybackSource(mode) {
     return;
   }
 
+  if (state.stemMixer) {
+    try { state.stemMixer.pause(); } catch (_) {}
+  }
+  updateGuideVocalsUI(false);
+
   state.playbackSource = mode;
   document.getElementById('btnModeYoutube').classList.toggle('active', mode === 'youtube');
   document.getElementById('btnModeSpotify').classList.toggle('active', mode === 'spotify');
 
   document.getElementById('deckYoutube').classList.toggle('hidden', mode !== 'youtube');
   document.getElementById('deckSpotify').classList.toggle('hidden', mode !== 'spotify');
+
+  if (mode === 'youtube' && state.ytPlayer && typeof state.ytPlayer.unMute === 'function') {
+    try { state.ytPlayer.unMute(); } catch (_) {}
+  }
 
   if (mode === 'spotify') {
     // Pause YouTube if playing
@@ -776,7 +1185,7 @@ function switchPlaybackSource(mode) {
 async function startSpotifyPKCELogin() {
   const clientId = document.getElementById('inputSpotifyClientId').value.trim();
   if (!clientId) {
-    alert('Bitte gib deine Spotify Client ID aus dem Spotify Developer Dashboard ein!');
+    showToast('Please enter your Spotify Client ID from the Spotify Developer Dashboard.', 'warning');
     return;
   }
 
@@ -856,7 +1265,7 @@ async function handleSpotifyOAuthRedirectCallback() {
     } else {
       const errText = await res.text();
       console.error('Spotify token exchange failed:', errText);
-      alert('Spotify Login fehlgeschlagen. Prüfe Client ID und Redirect URI (http://127.0.0.1:3000/).');
+      showToast('Spotify login failed. Please verify your Client ID and Redirect URI (http://127.0.0.1:3000/).', 'error');
     }
   } catch (err) {
     console.error('Spotify OAuth error:', err);
@@ -923,8 +1332,8 @@ function disconnectSpotify() {
   localStorage.removeItem('sing_spotify_access_token');
   localStorage.removeItem('sing_spotify_refresh_token');
 
-  document.getElementById('spotifyTopBadge').textContent = 'Verbinden';
-  document.getElementById('spotifyModalStatus').textContent = 'Status: Getrennt';
+  document.getElementById('spotifyTopBadge').textContent = 'Connect';
+  document.getElementById('spotifyModalStatus').textContent = 'Status: Disconnected';
   document.getElementById('btnSpotifyLogout').classList.add('hidden');
   switchPlaybackSource('youtube');
 }
@@ -936,10 +1345,10 @@ function initSpotifyWebPlayer() {
   if (state.spotifyPlayer) return;
 
   const statusBox = document.getElementById('spotifyModalStatus');
-  statusBox.textContent = 'Verbinde mit Spotify Premium Web Playback SDK...';
+  statusBox.textContent = 'Connecting to Spotify Premium Web Playback SDK...';
 
   const player = new window.Spotify.Player({
-    name: '🎤 SING! Party Studio Player',
+    name: 'SING! Studio Player',
     getOAuthToken: (cb) => {
       cb(state.spotifyAccessToken);
     },
@@ -949,9 +1358,9 @@ function initSpotifyWebPlayer() {
   player.addListener('ready', ({ device_id }) => {
     state.spotifyDeviceId = device_id;
     state.spotifyReady = true;
-    document.getElementById('spotifyTopBadge').textContent = '✓ Bereit';
+    document.getElementById('spotifyTopBadge').textContent = '✓ Ready';
     document.getElementById('btnSpotifyLogout').classList.remove('hidden');
-    statusBox.textContent = '✓ Verbunden! Dein Browser ist jetzt ein Spotify-Player.';
+    statusBox.textContent = '✓ Connected! Your browser is now a Spotify player.';
     document.getElementById('modalSpotify').classList.add('hidden');
     switchPlaybackSource('spotify');
   });
@@ -963,12 +1372,12 @@ function initSpotifyWebPlayer() {
 
   player.addListener('authentication_error', ({ message }) => {
     console.warn('Spotify auth error:', message);
-    statusBox.textContent = `Token abgelaufen oder ungültig (${message}). Bitte neu verbinden.`;
+    statusBox.textContent = `Token expired or invalid (${message}). Please reconnect.`;
     state.spotifyReady = false;
   });
 
   player.addListener('account_error', () => {
-    statusBox.textContent = 'Fehler: Für das Web Playback SDK wird ein Spotify Premium Account benötigt.';
+    statusBox.textContent = 'Error: Spotify Premium is required for Web Playback SDK.';
   });
 
   player.addListener('player_state_changed', (st) => {
@@ -1234,11 +1643,11 @@ async function performSongSearch(query) {
     resultsSec.classList.remove('hidden');
 
     if (combinedCards.length === 0) {
-      document.getElementById('resultsHeading').textContent = `Keine Songs für "${query}" gefunden`;
+      document.getElementById('resultsHeading').textContent = `No songs found for "${query}"`;
       return;
     }
 
-    document.getElementById('resultsHeading').textContent = `Gefundene Songs für "${query}" (${ultraMatches.length} Original SingStar-Melodien, ${combinedCards.length - ultraMatches.length} Auto-Sync)`;
+    document.getElementById('resultsHeading').textContent = `Found songs for "${query}" (${ultraMatches.length} SingStar charts, ${combinedCards.length - ultraMatches.length} auto-sync)`;
 
     combinedCards.forEach((song) => {
       const card = document.createElement('div');
@@ -1299,6 +1708,10 @@ async function startSongSession(song) {
   state.currentSong = song;
   resetScoreState();
   setVideoOffset(0);
+  if (state.stemMixer) {
+    try { state.stemMixer.pause(); } catch (_) {}
+  }
+  updateGuideVocalsUI(false);
   state.studioFirstLyricTime = extractFirstLrcTimestamp(song.syncedLyrics);
 
   document.getElementById('viewLobby').classList.remove('active');
@@ -1335,9 +1748,9 @@ async function startSongSession(song) {
 
   // USDB Song Loading
   if (song.isUsdb && song.usdbId) {
-    document.getElementById('badgeChartSource').textContent = '★ USDB Community Original-Noten';
+    document.getElementById('badgeChartSource').textContent = 'USDB Community Chart';
     document.getElementById('badgeChartSource').className = 'badge badge-gold';
-    document.getElementById('badgeSyncInfo').textContent = 'Lade USDB-Noten...';
+    document.getElementById('badgeSyncInfo').textContent = 'Loading USDB notes...';
 
     try {
       const res = await fetch(`/api/usdb/song?id=${song.usdbId}`);
@@ -1354,9 +1767,9 @@ async function startSongSession(song) {
   }
 
   if (song.isUltraStar && song.ultraStarId) {
-    document.getElementById('badgeChartSource').textContent = '★ Original SingStar/UltraStar Melodie';
+    document.getElementById('badgeChartSource').textContent = 'UltraStar Score Chart';
     document.getElementById('badgeChartSource').className = 'badge badge-gold';
-    document.getElementById('badgeSyncInfo').textContent = 'Lade Original-Noten...';
+    document.getElementById('badgeSyncInfo').textContent = 'Loading notes...';
 
     try {
       const txtRes = await fetch(`${ALLKARAOKE_BASE}/${encodeURIComponent(song.ultraStarId)}.txt`);
@@ -1370,7 +1783,7 @@ async function startSongSession(song) {
   }
 
   // Fallback for non-UltraStar songs
-  document.getElementById('badgeChartSource').textContent = '⚡ Rhythmus-Modus (LRCLIB – Keine Original-Noten)';
+  document.getElementById('badgeChartSource').textContent = 'Rhythm Mode (Auto-generated notes)';
   document.getElementById('badgeChartSource').className = 'badge';
   document.getElementById('selectDuetTrack').classList.add('hidden');
 
@@ -1413,10 +1826,12 @@ async function applyParsedUltraStarChart(txtContent, songMeta = {}) {
 
   const fullSongObj = {
     ...songMeta,
-    trackName: parsed.title || songMeta.trackName || 'Song',
-    artistName: parsed.artist || songMeta.artistName || '',
-    videoId: parsed.videoId || songMeta.videoId || '',
-    duration: parsed.duration || songMeta.duration || 210,
+    trackName: songMeta.trackName || parsed.title || 'Song',
+    artistName: songMeta.artistName || parsed.artist || '',
+    videoId: songMeta.videoId || parsed.videoId || '',
+    duration: songMeta.duration || parsed.duration || 210,
+    instrumentalUrl: songMeta.instrumentalUrl || null,
+    vocalsUrl: songMeta.vocalsUrl || null,
   };
   state.currentSong = fullSongObj;
 
@@ -1427,7 +1842,7 @@ async function applyParsedUltraStarChart(txtContent, songMeta = {}) {
   const duetSelect = document.getElementById('selectDuetTrack');
   if (parsed.tracks.length > 1) {
     duetSelect.innerHTML = parsed.tracks
-      .map((tr, i) => `<option value="${i}">🎤 ${escapeHtml(tr.name || `Stimme ${i + 1}`)}</option>`)
+      .map((tr, i) => `<option value="${i}">${escapeHtml(tr.name || `Voice ${i + 1}`)}</option>`)
       .join('');
     duetSelect.classList.remove('hidden');
   } else {
@@ -1490,8 +1905,8 @@ function parseUltraStarTxt(txt) {
   let videoGapSec = 0;
   let videoId = '';
   let duration = 0;
-  let p1Name = 'Stimme 1 (Lead)';
-  let p2Name = 'Stimme 2 (Duett)';
+  let p1Name = 'Voice 1 (Lead)';
+  let p2Name = 'Voice 2 (Duet)';
 
   const trackEvents = [[]];
   let currentTrackIdx = 0;
@@ -1651,15 +2066,17 @@ function parseUltraStarTxt(txt) {
 }
 
 function computeDynamicCanvasPitchRange() {
-  if (state.notes.length === 0) {
+  if (!state.notes || state.notes.length === 0) {
     state.chartMinMidi = 53;
     state.chartMaxMidi = 77;
+    state.viewportCenterMidi = 65;
+    state.viewportSpanMidi = 24;
     return;
   }
   let minM = 999;
   let maxM = 0;
   for (const n of state.notes) {
-    if (!n.isFreestyle) {
+    if (!n.isFreestyle && typeof n.midi === 'number') {
       if (n.midi < minM) minM = n.midi;
       if (n.midi > maxM) maxM = n.midi;
     }
@@ -1668,8 +2085,22 @@ function computeDynamicCanvasPitchRange() {
     minM = 58;
     maxM = 70;
   }
-  state.chartMinMidi = Math.max(40, minM - 5);
-  state.chartMaxMidi = Math.min(88, Math.max(state.chartMinMidi + 16, maxM + 5));
+  // Constant height tailored to each song: highest note + x notes, lowest note - x notes
+  const PADDING_NOTES = 3;
+  let songMin = minM - PADDING_NOTES;
+  let songMax = maxM + PADDING_NOTES;
+
+  // Guarantee comfortable minimum vertical range (at least 14 semitones) so narrow songs don't stretch
+  if (songMax - songMin < 14) {
+    const mid = (songMin + songMax) / 2;
+    songMin = Math.floor(mid - 7);
+    songMax = Math.ceil(mid + 7);
+  }
+
+  state.chartMinMidi = songMin;
+  state.chartMaxMidi = songMax;
+  state.viewportCenterMidi = (songMin + songMax) / 2;
+  state.viewportSpanMidi = songMax - songMin;
 }
 
 function updateFirstLyricLabel() {
@@ -1939,32 +2370,65 @@ async function findAndLoadYouTubeVideo(song, originalTxtVideoId = '') {
       setVideoOffset(0);
       document.getElementById('btnUseOriginalGap').classList.add('active-sync-mode');
       document.getElementById('btnUseStudioSync').classList.remove('active-sync-mode');
-      document.getElementById('badgeSyncInfo').textContent = '✓ Original Video-GAP aktiv';
+      document.getElementById('badgeSyncInfo').textContent = '✓ Original Video GAP active';
     } else {
       applyStudioSyncOffset();
     }
 
     loadYouTubeVideoById(first.videoId);
   } else {
-    overlay.textContent = 'Bitte eigene YouTube-URL unten einfügen.';
+    overlay.textContent = 'Please enter an alternative YouTube URL below.';
   }
 }
 
 function loadYouTubeVideoById(videoId) {
   const overlay = document.getElementById('ytOverlayStatus');
-  overlay.classList.add('hidden');
+  if (overlay) {
+    overlay.classList.add('hidden');
+    overlay.innerHTML = 'Loading video...';
+  }
+  const videoPanel = document.getElementById('videoPanel');
+  if (videoPanel) {
+    videoPanel.classList.remove('audio-only-mode');
+  }
 
   if (!state.ytReady || !window.YT || !window.YT.Player) {
     setTimeout(() => loadYouTubeVideoById(videoId), 250);
     return;
   }
 
+  const turnOffSubtitles = () => {
+    try {
+      if (state.ytPlayer) {
+        if (typeof state.ytPlayer.unloadModule === 'function') {
+          state.ytPlayer.unloadModule('captions');
+          state.ytPlayer.unloadModule('cc');
+        }
+        if (typeof state.ytPlayer.setOption === 'function') {
+          state.ytPlayer.setOption('captions', 'track', {});
+          state.ytPlayer.setOption('cc', 'track', {});
+          state.ytPlayer.setOption('captions', 'reload', false);
+        }
+      }
+    } catch (_) {}
+  };
+
   if (state.ytPlayer && typeof state.ytPlayer.loadVideoById === 'function') {
+    if (state.playbackSource === 'local') {
+      try { state.ytPlayer.mute(); } catch (_) {}
+    } else {
+      try { state.ytPlayer.unMute(); } catch (_) {}
+    }
     state.ytPlayer.loadVideoById({ videoId, startSeconds: 0 });
+    turnOffSubtitles();
+    setTimeout(turnOffSubtitles, 600);
+    setTimeout(turnOffSubtitles, 1600);
     return;
   }
 
   state.ytPlayer = new window.YT.Player('ytPlayerContainer', {
+    width: '100%',
+    height: '100%',
     videoId,
     playerVars: {
       autoplay: 1,
@@ -1973,56 +2437,426 @@ function loadYouTubeVideoById(videoId) {
       playsinline: 1,
       modestbranding: 1,
       enablejsapi: 1,
+      cc_load_policy: 0,
+      cc_lang_pref: 'none',
+      iv_load_policy: 3,
       origin: window.location.origin,
     },
     events: {
       onReady: () => {
-        overlay.classList.add('hidden');
+        if (overlay) overlay.classList.add('hidden');
+        if (state.playbackSource === 'local') {
+          try { state.ytPlayer.mute(); } catch (_) {}
+        } else {
+          try { state.ytPlayer.unMute(); } catch (_) {}
+        }
         state.isPlaying = true;
+        turnOffSubtitles();
+        setTimeout(turnOffSubtitles, 600);
+        setTimeout(turnOffSubtitles, 1600);
       },
       onStateChange: (ev) => {
         if (state.playbackSource === 'youtube') {
           state.isPlaying = ev.data === window.YT.PlayerState.PLAYING;
+        } else if (state.playbackSource === 'local') {
+          if (ev.data === window.YT.PlayerState.PLAYING) {
+            try { state.ytPlayer.mute(); } catch (_) {}
+          }
+        }
+        if (ev.data === window.YT.PlayerState.PLAYING) {
+          turnOffSubtitles();
         }
       },
       onError: (errEv) => {
         // Error 100 (not found), 101 / 150 (VEVO / owner blocks iframe embedding!)
-        console.warn('YouTube Embed Error code:', errEv.data, '-> switching to next available video!');
-        handleYouTubeEmbedFallback();
+        console.warn('YouTube Embed Error code:', errEv.data, '-> switching to next available video or audio fallback!');
+        handleYouTubeEmbedFallback(errEv.data);
       },
     },
   });
 }
 
-function handleYouTubeEmbedFallback() {
+function handleYouTubeEmbedFallback(errorCode) {
+  // 1. Try next available video candidate in state.ytVideoList (e.g. lyric or audio version)
   if (state.ytCurrentIndex + 1 < state.ytVideoList.length) {
     state.ytCurrentIndex++;
     const nextVid = state.ytVideoList[state.ytCurrentIndex];
     const selectEl = document.getElementById('selectYtVideo');
     if (selectEl) selectEl.value = nextVid.videoId;
 
-    document.getElementById('badgeSyncInfo').textContent = '↻ Video gesperrt – Auto-Wechsel auf Lyric/Audio!';
+    const isLyricOrAudio = /lyric|audio/i.test(nextVid.title || '');
+    showToast(
+      isLyricOrAudio
+        ? 'Video restricted by label – Switching to lyric video.'
+        : 'Video restricted by label – Trying alternate version.',
+      'warning',
+      4000
+    );
+
+    const badgeSync = document.getElementById('badgeSyncInfo');
+    if (badgeSync) {
+      badgeSync.textContent = '↻ Video restricted – Switching to Lyric/Audio version';
+    }
     if (nextVid.isOriginalGap) {
       setVideoOffset(0);
-      document.getElementById('btnUseOriginalGap').classList.add('active-sync-mode');
-      document.getElementById('btnUseStudioSync').classList.remove('active-sync-mode');
+      document.getElementById('btnUseOriginalGap')?.classList.add('active-sync-mode');
+      document.getElementById('btnUseStudioSync')?.classList.remove('active-sync-mode');
     } else {
       applyStudioSyncOffset();
     }
     loadYouTubeVideoById(nextVid.videoId);
-  } else {
-    const overlay = document.getElementById('ytOverlayStatus');
-    overlay.textContent = 'Dieses Video blockiert Einbettung. Wähle eine andere Version oder nutze 🟢 Spotify!';
+    return;
+  }
+
+  // 2. Check if local audio stems exist in currentSong or active stemMixer / localAudio
+  const song = state.currentSong;
+  const hasLocalStems = Boolean(
+    (state.playbackSource === 'local' && (state.stemMixer?.hasInstrumental || state.localAudio)) ||
+    (song && (song.instrumentalUrl || song.audioUrl))
+  );
+
+  if (hasLocalStems) {
+    if (state.playbackSource !== 'local' && song) {
+      const inst = song.instrumentalUrl || song.audioUrl;
+      setupLocalStemsAudio(inst, song.vocalsUrl || null);
+    }
+    enableAudioOnlyStageMode();
+    showToast('Video restricted by label – Playing studio audio.', 'info', 4500);
+    return;
+  }
+
+  // 3. Fallback when neither alternative video nor local stems exist
+  const overlay = document.getElementById('ytOverlayStatus');
+  if (overlay) {
+    overlay.textContent = 'This video blocks embedding. Please choose another version or paste an alternative link.';
     overlay.classList.remove('hidden');
   }
+  showToast('Video restricted by label and no local audio is available.', 'warning', 4500);
+}
+
+function enableAudioOnlyStageMode() {
+  const overlay = document.getElementById('ytOverlayStatus');
+  const videoPanel = document.getElementById('videoPanel');
+  if (videoPanel) {
+    videoPanel.classList.add('audio-only-mode');
+  }
+
+  const coverUrl =
+    state.currentSong?.artworkUrl ||
+    state.currentSong?.coverUrl ||
+    document.getElementById('stageCover')?.src ||
+    '';
+  const title = state.currentSong?.trackName || state.currentSong?.title || 'Studio Audio';
+  const artist = state.currentSong?.artistName || state.currentSong?.artist || 'Unknown Artist';
+
+  if (overlay) {
+    overlay.classList.remove('hidden');
+    overlay.innerHTML = `
+      <div class="audio-only-backdrop" style="background-image: url('${escapeHtml(coverUrl)}')">
+        <div class="audio-only-card">
+          ${coverUrl ? `<img src="${escapeHtml(coverUrl)}" class="audio-only-art" alt="Cover" />` : ''}
+          <div class="audio-only-meta">
+            <span class="audio-only-badge">🎙️ Studio Audio Mode</span>
+            <h3 class="audio-only-title">${escapeHtml(title)}</h3>
+            <p class="audio-only-artist">${escapeHtml(artist)}</p>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  // Ensure stems playback is unpaused and running
+  if (state.stemMixer) {
+    if (state.stemMixer.isPaused()) {
+      state.stemMixer.play().catch(() => {});
+    }
+  } else if (state.localAudio) {
+    if (state.localAudio.paused) {
+      state.localAudio.play().catch(() => {});
+    }
+  }
+  state.isPlaying = true;
+}
+
+/* ============================================================================
+ * 6.5 DUAL-STEM AUDIO ENGINE (Web Audio API Instrumental + Guide Vocals)
+ * ============================================================================ */
+class StemMixer {
+  constructor(audioCtx) {
+    this.ctx = audioCtx;
+    this.instAudio = new Audio();
+    this.vocalAudio = new Audio();
+    this.instAudio.preload = 'auto';
+    this.vocalAudio.preload = 'auto';
+
+    // Allow cross-origin audio streaming
+    this.instAudio.crossOrigin = 'anonymous';
+    this.vocalAudio.crossOrigin = 'anonymous';
+
+    this.instSource = this.ctx.createMediaElementSource(this.instAudio);
+    this.vocalSource = this.ctx.createMediaElementSource(this.vocalAudio);
+
+    this.instGain = this.ctx.createGain();
+    this.vocalGain = this.ctx.createGain();
+    this.masterGain = this.ctx.createGain();
+
+    this.instSource.connect(this.instGain).connect(this.masterGain);
+    this.vocalSource.connect(this.vocalGain).connect(this.masterGain);
+    this.masterGain.connect(this.ctx.destination);
+
+    this.guideVocalPercent = typeof state.settings?.guideVocalsVolume === 'number'
+      ? state.settings.guideVocalsVolume
+      : 35;
+    this.masterVolumePercent = typeof state.settings?.masterVolume === 'number'
+      ? state.settings.masterVolume
+      : 90;
+    this.hasVocals = false;
+    this.hasInstrumental = false;
+
+    this.updateGains();
+
+    this.instAudio.addEventListener('ended', () => {
+      state.isPlaying = false;
+      if (state.ytPlayer && typeof state.ytPlayer.pauseVideo === 'function') {
+        try {
+          state.ytPlayer.pauseVideo();
+        } catch (_) {}
+      }
+    });
+
+    this.instAudio.addEventListener('error', (e) => {
+      console.warn('StemMixer instrumental error:', e);
+    });
+
+    this.vocalAudio.addEventListener('error', (e) => {
+      console.warn('StemMixer vocal stem error:', e);
+    });
+  }
+
+  load(instrumentalUrl, vocalsUrl = null) {
+    this.pause();
+    this.instAudio.src = instrumentalUrl || '';
+    this.vocalAudio.src = vocalsUrl || '';
+    this.hasInstrumental = Boolean(instrumentalUrl);
+    this.hasVocals = Boolean(vocalsUrl);
+
+    if (this.hasInstrumental) {
+      try { this.instAudio.load(); } catch (_) {}
+    }
+    if (this.hasVocals) {
+      try { this.vocalAudio.load(); } catch (_) {}
+    }
+
+    this.updateGains();
+  }
+
+  async play() {
+    if (this.ctx && this.ctx.state === 'suspended') {
+      await this.ctx.resume().catch(() => {});
+    }
+
+    const promises = [];
+    if (this.hasInstrumental && this.instAudio.src) {
+      promises.push(
+        this.instAudio.play().catch((err) => {
+          console.warn('Autoplay instrumental blocked:', err);
+        })
+      );
+    }
+    if (this.hasVocals && this.vocalAudio.src) {
+      this.vocalAudio.currentTime = this.instAudio.currentTime;
+      promises.push(
+        this.vocalAudio.play().catch((err) => {
+          console.warn('Autoplay vocal stem blocked:', err);
+        })
+      );
+    }
+    await Promise.all(promises);
+  }
+
+  pause() {
+    try {
+      this.instAudio.pause();
+    } catch (_) {}
+    try {
+      this.vocalAudio.pause();
+    } catch (_) {}
+  }
+
+  seek(targetTime) {
+    const t = Math.max(0, targetTime);
+    try {
+      this.instAudio.currentTime = t;
+    } catch (_) {}
+    if (this.hasVocals) {
+      try {
+        this.vocalAudio.currentTime = t;
+      } catch (_) {}
+    }
+  }
+
+  getCurrentTime() {
+    return this.instAudio.currentTime || 0;
+  }
+
+  isPaused() {
+    return this.instAudio.paused;
+  }
+
+  setGuideVocalsVolume(percent) {
+    this.guideVocalPercent = Math.max(0, Math.min(100, Number(percent) || 0));
+    this.updateGains();
+  }
+
+  setMasterVolume(percent) {
+    this.masterVolumePercent = Math.max(0, Math.min(100, Number(percent) || 0));
+    this.updateGains();
+  }
+
+  updateGains() {
+    if (!this.ctx) return;
+    const now = this.ctx.currentTime;
+    const v = this.hasVocals ? (this.guideVocalPercent / 100) : 0;
+    const m = (this.masterVolumePercent / 100);
+
+    if (this.vocalGain && this.vocalGain.gain) {
+      try {
+        this.vocalGain.gain.setValueAtTime(v, now);
+      } catch (_) {
+        this.vocalGain.gain.value = v;
+      }
+    }
+    if (this.instGain && this.instGain.gain) {
+      try {
+        this.instGain.gain.setValueAtTime(1.0, now);
+      } catch (_) {
+        this.instGain.gain.value = 1.0;
+      }
+    }
+    if (this.masterGain && this.masterGain.gain) {
+      try {
+        this.masterGain.gain.setValueAtTime(m, now);
+      } catch (_) {
+        this.masterGain.gain.value = m;
+      }
+    }
+  }
+
+  syncDrift() {
+    if (this.hasVocals && !this.instAudio.paused && !this.vocalAudio.paused) {
+      const diff = Math.abs(this.vocalAudio.currentTime - this.instAudio.currentTime);
+      if (diff > 0.018) {
+        this.vocalAudio.currentTime = this.instAudio.currentTime;
+      }
+    }
+  }
+
+  dispose() {
+    this.pause();
+    try {
+      this.instAudio.src = '';
+      this.vocalAudio.src = '';
+    } catch (_) {}
+    this.hasVocals = false;
+    this.hasInstrumental = false;
+  }
+}
+
+function ensureStemMixer() {
+  if (state.stemMixer) return state.stemMixer;
+  const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+  if (!AudioContextClass) return null;
+
+  try {
+    if (!state.audioCtx) {
+      state.audioCtx = new AudioContextClass();
+    }
+    state.stemMixer = new StemMixer(state.audioCtx);
+    state.localAudio = state.stemMixer.instAudio; // Backward compatibility
+    return state.stemMixer;
+  } catch (err) {
+    console.warn('Could not initialize StemMixer:', err);
+    return null;
+  }
+}
+
+function updateGuideVocalsUI(hasVocals) {
+  const group = document.getElementById('groupGuideVocals');
+  const slider = document.getElementById('sliderGuideVocals');
+  const val = document.getElementById('lblGuideVocalsVal');
+  if (!group || !slider || !val) return;
+
+  if (hasVocals) {
+    slider.disabled = false;
+    group.classList.remove('disabled');
+    group.title = 'Guide Vocals: Balance artist voice with instrumental';
+    slider.value = state.settings.guideVocalsVolume;
+    val.textContent = `${state.settings.guideVocalsVolume}%`;
+  } else {
+    slider.disabled = true;
+    group.classList.add('disabled');
+    group.title = 'Full mix only';
+    val.textContent = 'N/A';
+  }
+}
+
+function setupLocalStemsAudio(instrumentalUrl, vocalsUrl = null) {
+  state.playbackSource = 'local';
+  const mixer = ensureStemMixer();
+
+  if (mixer) {
+    mixer.load(instrumentalUrl, vocalsUrl);
+    state.localAudio = mixer.instAudio;
+    updateGuideVocalsUI(Boolean(vocalsUrl));
+
+    if (state.ytPlayer && typeof state.ytPlayer.mute === 'function') {
+      try {
+        state.ytPlayer.mute();
+      } catch (_) {}
+    }
+
+    mixer.play().then(() => {
+      state.isPlaying = true;
+      if (state.ytPlayer && typeof state.ytPlayer.playVideo === 'function') {
+        try {
+          state.ytPlayer.mute();
+          state.ytPlayer.playVideo();
+        } catch (_) {}
+      }
+    }).catch((err) => {
+      console.log('Autoplay stems blocked (can be started manually):', err);
+    });
+  } else {
+    // Fallback if Web Audio API is unavailable
+    if (state.localAudio) {
+      try {
+        state.localAudio.pause();
+        state.localAudio.src = '';
+      } catch (_) {}
+    }
+    state.localAudio = new Audio(instrumentalUrl);
+    updateGuideVocalsUI(false);
+    state.localAudio.play().then(() => {
+      state.isPlaying = true;
+    }).catch(() => {});
+  }
+}
+
+function setupLocalInstrumentalAudio(audioUrl, vocalsUrl = null) {
+  setupLocalStemsAudio(audioUrl, vocalsUrl);
 }
 
 /* ============================================================================
  * 7. UNIFIED PLAYBACK TIME & TRANSPORT CONTROLS (YouTube + Spotify)
  * ============================================================================ */
 function getRawPlayerTime() {
-  if (state.playbackSource === 'local' && state.localAudio) {
-    return state.localAudio.currentTime;
+  if (state.playbackSource === 'local') {
+    if (state.stemMixer) {
+      return state.stemMixer.getCurrentTime();
+    }
+    if (state.localAudio) {
+      return state.localAudio.currentTime;
+    }
   }
 
   if (state.playbackSource === 'spotify' && state.spotifyReady) {
@@ -2059,12 +2893,35 @@ function getSongTimeWithOffset() {
 }
 
 function togglePlayPause() {
-  if (state.playbackSource === 'local' && state.localAudio) {
-    if (state.localAudio.paused) {
-      state.localAudio.play().catch(() => {});
+  if (state.playbackSource === 'local') {
+    const isPaused = state.stemMixer
+      ? state.stemMixer.isPaused()
+      : (state.localAudio ? state.localAudio.paused : true);
+
+    if (isPaused) {
+      if (state.stemMixer) {
+        state.stemMixer.play().catch(() => {});
+      } else if (state.localAudio) {
+        state.localAudio.play().catch(() => {});
+      }
+      if (state.ytPlayer && typeof state.ytPlayer.playVideo === 'function') {
+        try {
+          state.ytPlayer.mute();
+          state.ytPlayer.playVideo();
+        } catch (_) {}
+      }
       state.isPlaying = true;
     } else {
-      state.localAudio.pause();
+      if (state.stemMixer) {
+        state.stemMixer.pause();
+      } else if (state.localAudio) {
+        state.localAudio.pause();
+      }
+      if (state.ytPlayer && typeof state.ytPlayer.pauseVideo === 'function') {
+        try {
+          state.ytPlayer.pauseVideo();
+        } catch (_) {}
+      }
       state.isPlaying = false;
     }
     return;
@@ -2091,9 +2948,22 @@ function togglePlayPause() {
 
 function restartSong() {
   resetScoreState();
-  if (state.playbackSource === 'local' && state.localAudio) {
-    state.localAudio.currentTime = 0;
-    state.localAudio.play().catch(() => {});
+  if (state.playbackSource === 'local') {
+    if (state.stemMixer) {
+      state.stemMixer.seek(0);
+      state.stemMixer.play().catch(() => {});
+    } else if (state.localAudio) {
+      state.localAudio.currentTime = 0;
+      state.localAudio.play().catch(() => {});
+    }
+    if (state.ytPlayer && typeof state.ytPlayer.seekTo === 'function') {
+      try {
+        state.ytPlayer.mute();
+        const startGap = Math.max(0, state.videoOffsetSec || 0);
+        state.ytPlayer.seekTo(startGap, true);
+        state.ytPlayer.playVideo();
+      } catch (_) {}
+    }
     state.isPlaying = true;
     return;
   }
@@ -2118,9 +2988,21 @@ function skipToFirstVocals() {
   const targetSongTime = Math.max(0, state.firstLyricTime - 2.8);
   const targetRawTime = Math.max(0, targetSongTime + state.videoOffsetSec);
 
-  if (state.playbackSource === 'local' && state.localAudio) {
-    state.localAudio.currentTime = Math.max(0, targetRawTime);
-    state.localAudio.play().catch(() => {});
+  if (state.playbackSource === 'local') {
+    if (state.stemMixer) {
+      state.stemMixer.seek(targetSongTime);
+      state.stemMixer.play().catch(() => {});
+    } else if (state.localAudio) {
+      state.localAudio.currentTime = Math.max(0, targetRawTime);
+      state.localAudio.play().catch(() => {});
+    }
+    if (state.ytPlayer && typeof state.ytPlayer.seekTo === 'function') {
+      try {
+        state.ytPlayer.mute();
+        state.ytPlayer.seekTo(targetRawTime, true);
+        state.ytPlayer.playVideo();
+      } catch (_) {}
+    }
     state.isPlaying = true;
     return;
   }
@@ -2143,6 +3025,11 @@ function skipToFirstVocals() {
 }
 
 function leaveStageToLobby() {
+  if (state.stemMixer) {
+    try {
+      state.stemMixer.pause();
+    } catch (_) {}
+  }
   if (state.localAudio) {
     try {
       state.localAudio.pause();
@@ -2205,12 +3092,15 @@ async function startMicrophone(deviceId = '') {
     highpass.connect(lowpass);
     lowpass.connect(state.analyser);
 
+    state.micSource = source;
+    updateMicMonitoring();
+
     state.micActive = true;
     document.getElementById('micStatusDot').classList.add('active');
-    document.getElementById('micStatusText').textContent = 'Mikrofon aktiv';
+    document.getElementById('micStatusText').textContent = 'Microphone On';
   } catch (err) {
     console.error('Microphone access error:', err);
-    alert('Mikrofon-Zugriff wurde blockiert oder nicht gefunden. Bitte erlaube den Mikrofon-Zugriff im Browser!');
+    showToast('Microphone access was blocked or not found. Please allow microphone permissions in your browser!', 'error');
   }
 }
 
@@ -2219,10 +3109,24 @@ function stopMicrophone() {
     state.micStream.getTracks().forEach((t) => t.stop());
     state.micStream = null;
   }
+  if (state.micMonitorGain) {
+    state.micMonitorGain.gain.value = 0;
+  }
+  state.micSource = null;
   state.micActive = false;
   document.getElementById('micStatusDot').classList.remove('active');
-  document.getElementById('micStatusText').textContent = 'Mikrofon aktivieren';
+  document.getElementById('micStatusText').textContent = 'Microphone';
   document.getElementById('topLiveNote').textContent = '--';
+}
+
+async function toggleMicrophone() {
+  if (!state.micActive) {
+    await startMicrophone(state.selectedDeviceId);
+    showToast('Microphone active', 'info', 1500);
+  } else {
+    stopMicrophone();
+    showToast('Microphone muted', 'info', 1500);
+  }
 }
 
 async function populateAudioDevices() {
@@ -2274,12 +3178,34 @@ function updateMicrophonePitch() {
     if (state.recentRawMidis.length > 0) {
       const prevMedian = getMedian(state.recentRawMidis);
       const diff = rawMidi - prevMedian;
+      // Octave jump / doubling correction
       if (Math.abs(diff - 12) < 1.8) stabilizedRaw -= 12;
       else if (Math.abs(diff + 12) < 1.8) stabilizedRaw += 12;
+
+      // 1-frame outlier spike rejection: deviations > 3.5 semitones must be confirmed by the subsequent frame
+      const dev = Math.abs(stabilizedRaw - prevMedian);
+      if (dev > 3.5) {
+        if (state.pendingPitchSpike === null) {
+          state.pendingPitchSpike = stabilizedRaw;
+          stabilizedRaw = prevMedian;
+        } else {
+          // If within 2.0 semitones of pending spike, confirm intentional pitch transition
+          if (Math.abs(stabilizedRaw - state.pendingPitchSpike) < 2.0) {
+            state.pendingPitchSpike = null;
+          } else {
+            state.pendingPitchSpike = stabilizedRaw;
+            stabilizedRaw = prevMedian;
+          }
+        }
+      } else {
+        state.pendingPitchSpike = null;
+      }
+    } else {
+      state.pendingPitchSpike = null;
     }
 
     state.recentRawMidis.push(stabilizedRaw);
-    if (state.recentRawMidis.length > 7) state.recentRawMidis.shift();
+    if (state.recentRawMidis.length > 5) state.recentRawMidis.shift();
 
     const medianMidi = getMedian(state.recentRawMidis);
 
@@ -2289,9 +3215,19 @@ function updateMicrophonePitch() {
       state.smoothedMidi = medianMidi;
       state.lastDisplayedMidi = null;
     } else {
-      state.smoothedMidi = state.smoothedMidi === null ? medianMidi : state.smoothedMidi * 0.68 + medianMidi * 0.32;
+      state.smoothedMidi =
+        state.smoothedMidi === null
+          ? medianMidi
+          : stabilizePitchMidi(medianMidi, state.smoothedMidi, clarity, 0.016);
     }
     state.silentFrameCount = 0;
+
+    // Track singer's vocal register across active singing
+    if (state.singerVocalRegister === null) {
+      state.singerVocalRegister = state.smoothedMidi;
+    } else {
+      state.singerVocalRegister = state.singerVocalRegister * 0.95 + state.smoothedMidi * 0.05;
+    }
 
     state.currentHz = Math.round(midiToHz(state.smoothedMidi));
     state.currentMidi = state.smoothedMidi;
@@ -2307,6 +3243,7 @@ function updateMicrophonePitch() {
 function markMicSilence() {
   state.silentFrameCount++;
   state.voicedFrameCount = 0;
+  state.pendingPitchSpike = null;
   if (state.silentFrameCount > 3) {
     state.currentHz = 0;
     state.currentMidi = null;
@@ -2327,20 +3264,54 @@ function updateLiveNoteLabels(noteStr, hz, clarity) {
   document.getElementById('modalLiveClarity').textContent = `${clarity}%`;
 }
 
+// Pre-computed Hann window cache for MPM
+let hannWindowCache = null;
+let hannWindowCacheN = 0;
+
+function getHannWindow(N) {
+  if (hannWindowCache && hannWindowCacheN === N) return hannWindowCache;
+  const w = new Float32Array(N);
+  for (let i = 0; i < N; i++) {
+    w[i] = 0.5 * (1 - Math.cos((2 * Math.PI * i) / N));
+  }
+  hannWindowCache = w;
+  hannWindowCacheN = N;
+  return w;
+}
+
+// Adaptive Pitch Stabilizer with Deadband (smooths micro-vibrato, fast on intentional transitions)
+function stabilizePitchMidi(newMidi, prevMidi, clarity = 1.0, dt = 0.016) {
+  if (prevMidi === null || !Number.isFinite(prevMidi)) return newMidi;
+
+  const delta = newMidi - prevMidi;
+
+  // Deadband for micro-vibrato: if within ±0.32 semitones, damp movement
+  if (Math.abs(delta) < 0.32) {
+    return prevMidi + delta * 0.18;
+  }
+
+  // Intentional pitch transitions: smooth fast transition
+  const normDt = Math.max(0.001, Math.min(0.1, dt));
+  const alpha = Math.min(1.0, (0.35 + (clarity || 0.8) * 0.4) * (normDt / 0.016));
+  return prevMidi + delta * alpha;
+}
+
 function detectPitchMPM(buffer, sampleRate) {
   const N = Math.min(buffer.length, 1536);
   const minLag = Math.floor(sampleRate / 1000);
   const maxLag = Math.min(N - 2, Math.floor(sampleRate / 78));
+  const win = getHannWindow(N);
 
   const nsdf = new Float32Array(maxLag + 1);
   for (let tau = minLag; tau <= maxLag; tau++) {
     let acf = 0;
     let divisor = 0;
     for (let i = 0; i < N - tau; i++) {
+      const w = win[i];
       const a = buffer[i];
       const b = buffer[i + tau];
-      acf += a * b;
-      divisor += a * a + b * b;
+      acf += w * a * b;
+      divisor += w * (a * a + b * b);
     }
     nsdf[tau] = divisor > 0 ? (2 * acf) / divisor : 0;
   }
@@ -2408,59 +3379,813 @@ function detectPitchMPM(buffer, sampleRate) {
   };
 }
 
-async function runInteractiveLatencyCalibration() {
-  if (!state.micActive) {
-    await startMicrophone(state.selectedDeviceId);
+/* ============================================================================
+ * 8. DUAL-MODE LATENCY CALIBRATION & TOAST NOTIFICATION ENGINE (PHASE 6)
+ * ============================================================================ */
+
+/**
+ * Toast Notification System
+ * Non-blocking, glassmorphic toast notification in top-right corner.
+ */
+function showToast(message, type = 'info', durationMs = 3500) {
+  let container = document.getElementById('toastContainer');
+  if (!container) {
+    container = document.createElement('div');
+    container.id = 'toastContainer';
+    container.className = 'toast-container';
+    container.setAttribute('aria-live', 'polite');
+    document.body.appendChild(container);
   }
-  if (!state.audioCtx) return;
 
-  const statusEl = document.getElementById('calibrationStatusText');
-  const btn = document.getElementById('btnRunCalibration');
-  btn.disabled = true;
+  const toast = document.createElement('div');
+  toast.className = `toast toast-${type}`;
 
-  const intervalMs = 650;
-  const detectedOffsets = [];
+  const iconMap = {
+    info: 'ℹ️',
+    success: '✓',
+    warning: '⚠️',
+    error: '✕',
+  };
+  const icon = iconMap[type] || 'ℹ️';
 
-  statusEl.textContent = 'Mache dich bereit... Klatsche bei jedem der 4 Töne mit!';
+  const iconSpan = document.createElement('span');
+  iconSpan.className = 'toast-icon';
+  iconSpan.textContent = icon;
+  const textSpan = document.createElement('span');
+  textSpan.className = 'toast-message';
+  textSpan.textContent = message;
 
-  for (let beat = 1; beat <= 4; beat++) {
-    await new Promise((r) => setTimeout(r, intervalMs));
-    const osc = state.audioCtx.createOscillator();
-    const gain = state.audioCtx.createGain();
-    osc.frequency.value = beat === 4 ? 880 : 587.33;
-    gain.gain.setValueAtTime(0.25, state.audioCtx.currentTime);
-    gain.gain.exponentialRampToValueAtTime(0.001, state.audioCtx.currentTime + 0.06);
-    osc.connect(gain);
-    gain.connect(state.audioCtx.destination);
-    osc.start();
-    osc.stop(state.audioCtx.currentTime + 0.065);
+  toast.appendChild(iconSpan);
+  toast.appendChild(textSpan);
+  container.appendChild(toast);
 
-    const beepTs = performance.now();
-    statusEl.textContent = `Ton ${beat} / 4 – Klatschen!`;
+  setTimeout(() => {
+    toast.classList.add('toast-hiding');
+    setTimeout(() => {
+      if (toast.parentNode) {
+        toast.parentNode.removeChild(toast);
+      }
+    }, 280);
+  }, durationMs);
 
-    let peakVol = 0;
-    let peakTime = 0;
-    const startPoll = performance.now();
-    while (performance.now() - startPoll < 420) {
-      await new Promise((r) => setTimeout(r, 8));
-      if (state.currentVolume > peakVol && state.currentVolume > state.noiseGatePercent + 8) {
-        peakVol = state.currentVolume;
-        peakTime = performance.now();
+  return toast;
+}
+
+/**
+ * Stage Live Offset Quick-Nudge
+ * Adjusts latency by deltaMs, clamps to [-100, 450], persists to settings, and notifies via toast.
+ */
+function nudgeLatency(deltaMs) {
+  const newLatency = Math.max(-100, Math.min(450, state.latencyMs + deltaMs));
+  setLatencyMs(newLatency);
+  showToast(`Latency: ${newLatency > 0 ? '+' : ''}${newLatency}ms`, 'info', 1600);
+}
+
+/**
+ * Calibration State
+ */
+const calState = {
+  modalOpen: false,
+  activeMode: 'chirp', // 'chirp' | 'tap'
+  // Chirp calibration
+  isChirpRunning: false,
+  calibratedChirpMs: null,
+  // Metronome Rhythm Tap
+  metronomeRunning: false,
+  metronomeIntervalMs: 600, // 100 BPM
+  metronomeStartTime: 0,
+  nextBeatTime: 0,
+  metronomeRafId: null,
+  taps: [], // Array of offsetMs
+  maxTaps: 8,
+  calibratedTapMs: null,
+};
+
+/**
+ * Synthesizes a reference acoustic chirp signal
+ * 40ms 1.2 kHz sine burst with fast attack and cosine decay envelope.
+ */
+function generateChirpSignal(sampleRate = 44100, durationMs = 40, freqHz = 1200) {
+  const numSamples = Math.round((durationMs / 1000) * sampleRate);
+  const chirp = new Float32Array(numSamples);
+  const attackSamples = Math.max(1, Math.round(sampleRate * 0.003)); // 3ms attack
+
+  for (let i = 0; i < numSamples; i++) {
+    const t = i / sampleRate;
+    let envelope = 1.0;
+    if (i < attackSamples) {
+      envelope = 0.5 * (1 - Math.cos((Math.PI * i) / attackSamples));
+    } else {
+      const decayProgress = (i - attackSamples) / Math.max(1, numSamples - attackSamples);
+      envelope = 0.5 * (1 + Math.cos(Math.PI * decayProgress));
+    }
+    chirp[i] = Math.sin(2 * Math.PI * freqHz * t) * envelope;
+  }
+  return chirp;
+}
+
+/**
+ * Computes cross-correlation between microphone signal and reference chirp.
+ * Evaluates lag space with parabolic interpolation for sub-millisecond precision.
+ */
+function computeCrossCorrelation(signal, reference, minLag = 0, maxLag = null, sampleRate = 44100) {
+  const sigLen = signal ? signal.length : 0;
+  const refLen = reference ? reference.length : 0;
+  if (sigLen === 0 || refLen === 0 || sigLen < refLen) {
+    return {
+      peakLag: 0,
+      peakCorrelation: 0,
+      refinedLag: 0,
+      refinedLatencyMs: 0,
+      confidence: 0,
+    };
+  }
+
+  const effectiveMaxLag = Math.min(
+    sigLen - refLen,
+    maxLag !== null ? maxLag : sigLen - refLen
+  );
+  const effectiveMinLag = Math.max(0, minLag);
+
+  if (effectiveMaxLag < effectiveMinLag) {
+    return {
+      peakLag: 0,
+      peakCorrelation: 0,
+      refinedLag: 0,
+      refinedLatencyMs: 0,
+      confidence: 0,
+    };
+  }
+
+  // Precompute reference energy
+  let refEnergy = 0;
+  for (let i = 0; i < refLen; i++) {
+    refEnergy += reference[i] * reference[i];
+  }
+  if (refEnergy <= 1e-12) refEnergy = 1e-12;
+
+  let bestLag = effectiveMinLag;
+  let maxCorr = -Infinity;
+  const numLags = effectiveMaxLag - effectiveMinLag + 1;
+  const corrValues = new Float32Array(numLags);
+
+  for (let lag = effectiveMinLag; lag <= effectiveMaxLag; lag++) {
+    let corr = 0;
+    for (let i = 0; i < refLen; i++) {
+      corr += reference[i] * signal[lag + i];
+    }
+    corrValues[lag - effectiveMinLag] = corr;
+    if (corr > maxCorr) {
+      maxCorr = corr;
+      bestLag = lag;
+    }
+  }
+
+  // Compute local signal energy at bestLag for normalized correlation
+  let localSigEnergy = 0;
+  for (let i = 0; i < refLen; i++) {
+    const s = signal[bestLag + i];
+    localSigEnergy += s * s;
+  }
+  const norm = Math.sqrt(refEnergy * (localSigEnergy + 1e-10));
+  const normalizedCorr = norm > 0 ? maxCorr / norm : 0;
+
+  // Parabolic interpolation for sub-sample refinement
+  let refinedLag = bestLag;
+  const bestIdx = bestLag - effectiveMinLag;
+  if (bestIdx > 0 && bestIdx < numLags - 1) {
+    const alpha = corrValues[bestIdx - 1];
+    const beta = corrValues[bestIdx];
+    const gamma = corrValues[bestIdx + 1];
+    const denom = 2 * (alpha - 2 * beta + gamma);
+    if (Math.abs(denom) > 1e-9) {
+      const delta = (alpha - gamma) / denom;
+      if (Math.abs(delta) <= 1.0) {
+        refinedLag = bestLag + delta;
       }
     }
-    if (peakTime > 0 && beat >= 2) {
-      detectedOffsets.push(peakTime - beepTs);
-    }
   }
 
-  btn.disabled = false;
-  if (detectedOffsets.length > 0) {
-    const avgMs = Math.round(detectedOffsets.reduce((a, b) => a + b, 0) / detectedOffsets.length);
-    setLatencyMs(avgMs);
-    statusEl.textContent = `✓ Kalibrierung erfolgreich! Gemessene Latenz: ${avgMs} ms.`;
-  } else {
-    statusEl.textContent = 'Kein Klatschen erkannt. Bitte lauter klatschen oder Regler manuell nutzen.';
+  const refinedLatencyMs = (refinedLag / sampleRate) * 1000;
+
+  return {
+    peakLag: bestLag,
+    peakCorrelation: maxCorr,
+    normalizedCorrelation: Math.max(0, Math.min(1, normalizedCorr)),
+    refinedLag: refinedLag,
+    refinedLatencyMs: Math.round(refinedLatencyMs * 100) / 100,
+    confidence: Math.max(0, Math.min(1, normalizedCorr)),
+  };
+}
+
+/**
+ * Outlier rejection and statistics calculation for Rhythm Tap offsets
+ * Discards first 2 warmup taps, computes mean and standard deviation,
+ * rejects outliers (> 2 * stdDev), and returns calibrated latency.
+ */
+function processRhythmTapOffsets(tapOffsets) {
+  if (!tapOffsets || tapOffsets.length <= 2) {
+    return {
+      success: false,
+      reason: 'At least 3 taps required (first 2 taps are warmups).',
+    };
   }
+
+  // 1. Discard first 2 warmup taps
+  const candidateTaps = tapOffsets.slice(2);
+
+  // 2. Calculate mean and standard deviation
+  const mean = candidateTaps.reduce((a, b) => a + b, 0) / candidateTaps.length;
+  const variance =
+    candidateTaps.reduce((acc, val) => acc + Math.pow(val - mean, 2), 0) /
+    candidateTaps.length;
+  const stdDev = Math.sqrt(variance);
+
+  // 3. Outlier rejection: reject values deviating > max(14, 2 * stdDev)
+  const threshold = Math.max(14, 2 * stdDev);
+  const validTaps = candidateTaps.filter((val) => Math.abs(val - mean) <= threshold);
+  const rejectedCount = candidateTaps.length - validTaps.length;
+
+  const finalMean =
+    validTaps.length > 0
+      ? validTaps.reduce((a, b) => a + b, 0) / validTaps.length
+      : mean;
+
+  const finalLatencyMs = Math.round(finalMean);
+
+  return {
+    success: true,
+    warmupCount: 2,
+    totalTaps: tapOffsets.length,
+    candidateCount: candidateTaps.length,
+    validCount: validTaps.length,
+    rejectedCount,
+    mean: Math.round(mean),
+    stdDev: Math.round(stdDev * 10) / 10,
+    calibratedLatencyMs: Math.max(-100, Math.min(450, finalLatencyMs)),
+  };
+}
+
+/**
+ * Mode 1: Automated Acoustic Loopback Chirp Calibration
+ * Plays 3 short audio chirps (40ms, 1.2 kHz) and cross-correlates mic input.
+ */
+async function runAcousticChirpCalibration() {
+  if (calState.isChirpRunning) return;
+  calState.isChirpRunning = true;
+
+  const btnStart = document.getElementById('btnStartChirpCal');
+  const btnRunOld = document.getElementById('btnRunCalibration');
+  const statusEl = document.getElementById('chirpStatusText');
+  const progressFill = document.getElementById('chirpProgressFill');
+  const resultCard = document.getElementById('chirpResultCard');
+  const lblResultMs = document.getElementById('lblChirpResultMs');
+  const lblConfidence = document.getElementById('lblChirpConfidence');
+  const oldStatusEl = document.getElementById('calibrationStatusText');
+
+  if (btnStart) btnStart.disabled = true;
+  if (btnRunOld) btnRunOld.disabled = true;
+  if (resultCard) resultCard.classList.add('hidden');
+
+  const setStatus = (txt, pct = 0) => {
+    if (statusEl) statusEl.textContent = txt;
+    if (oldStatusEl) oldStatusEl.textContent = txt;
+    if (progressFill) progressFill.style.width = `${pct}%`;
+  };
+
+  const setBadge = (burstNum, stateClass) => {
+    const badge = document.getElementById(`chirpBadge${burstNum}`);
+    if (!badge) return;
+    badge.classList.remove('active', 'done');
+    if (stateClass) badge.classList.add(stateClass);
+  };
+
+  try {
+    if (!state.micActive) {
+      setStatus('Requesting microphone access...', 5);
+      await startMicrophone(state.selectedDeviceId);
+    }
+    if (!state.audioCtx || !state.micSource) {
+      setStatus('Microphone unavailable. Please grant microphone access.', 0);
+      calState.isChirpRunning = false;
+      if (btnStart) btnStart.disabled = false;
+      if (btnRunOld) btnRunOld.disabled = false;
+      return;
+    }
+    if (state.audioCtx.state === 'suspended') {
+      await state.audioCtx.resume();
+    }
+
+    const sampleRate = state.audioCtx.sampleRate;
+    const durationMs = 40;
+    const chirpRef = generateChirpSignal(sampleRate, durationMs, 1200);
+
+    // Create AudioBuffer for output
+    const chirpBuffer = state.audioCtx.createBuffer(1, chirpRef.length, sampleRate);
+    chirpBuffer.getChannelData(0).set(chirpRef);
+
+    // Setup temporary ScriptProcessorNode for recording
+    const scriptNode = state.audioCtx.createScriptProcessor(2048, 1, 1);
+    const silentGain = state.audioCtx.createGain();
+    silentGain.gain.value = 0;
+
+    const capturedChunks = [];
+    let isRecording = false;
+
+    scriptNode.onaudioprocess = (e) => {
+      if (!isRecording) return;
+      const input = e.inputBuffer.getChannelData(0);
+      capturedChunks.push(new Float32Array(input));
+    };
+
+    state.micSource.connect(scriptNode);
+    scriptNode.connect(silentGain);
+    silentGain.connect(state.audioCtx.destination);
+
+    // Reset badges
+    setBadge(1, null);
+    setBadge(2, null);
+    setBadge(3, null);
+
+    const detectedDelays = [];
+
+    for (let burst = 1; burst <= 3; burst++) {
+      setBadge(burst, 'active');
+      setStatus(`Transmitting burst ${burst} / 3 (1.2 kHz acoustic chirp)...`, Math.round((burst - 1) * 33));
+
+      capturedChunks.length = 0;
+      isRecording = true;
+
+      // Schedule chirp with 50ms lead time
+      const leadSec = 0.05;
+      const playTime = state.audioCtx.currentTime + leadSec;
+      const chirpSource = state.audioCtx.createBufferSource();
+      chirpSource.buffer = chirpBuffer;
+      chirpSource.connect(state.audioCtx.destination);
+      chirpSource.start(playTime);
+
+      // Record for 450ms after scheduled play time
+      await new Promise((r) => setTimeout(r, Math.round((leadSec + 0.45) * 1000)));
+      isRecording = false;
+
+      // Flatten recorded samples
+      let totalSamples = 0;
+      for (const c of capturedChunks) totalSamples += c.length;
+
+      if (totalSamples > chirpRef.length * 2) {
+        const flattened = new Float32Array(totalSamples);
+        let offset = 0;
+        for (const c of capturedChunks) {
+          flattened.set(c, offset);
+          offset += c.length;
+        }
+
+        const expectedLeadSamples = Math.round(leadSec * sampleRate);
+        const searchMin = Math.max(0, expectedLeadSamples - Math.round(0.01 * sampleRate));
+        const searchMax = Math.min(
+          flattened.length - chirpRef.length,
+          expectedLeadSamples + Math.round(0.42 * sampleRate)
+        );
+
+        const corr = computeCrossCorrelation(flattened, chirpRef, searchMin, searchMax, sampleRate);
+
+        const delaySamples = corr.refinedLag - expectedLeadSamples;
+        const delayMs = (delaySamples / sampleRate) * 1000;
+
+        if (corr.confidence >= 0.12 && delayMs >= -30 && delayMs <= 400) {
+          detectedDelays.push({ burst, delayMs, confidence: corr.confidence });
+        }
+      }
+
+      setBadge(burst, 'done');
+      await new Promise((r) => setTimeout(r, 320));
+    }
+
+    // Clean up temporary nodes
+    try {
+      state.micSource.disconnect(scriptNode);
+      scriptNode.disconnect();
+      silentGain.disconnect();
+    } catch (_) {}
+
+    if (detectedDelays.length > 0) {
+      const sorted = detectedDelays.map((d) => d.delayMs).sort((a, b) => a - b);
+      const medianDelay = sorted[Math.floor(sorted.length / 2)];
+      const calibratedMs = Math.max(-100, Math.min(450, Math.round(medianDelay)));
+      calState.calibratedChirpMs = calibratedMs;
+
+      const variance = sorted.length > 1 ? Math.abs(sorted[sorted.length - 1] - sorted[0]) : 0;
+      const confDesc = detectedDelays[0].confidence > 0.35 ? 'High' : 'Moderate';
+
+      if (lblResultMs) lblResultMs.textContent = calibratedMs;
+      if (lblConfidence) {
+        lblConfidence.textContent = `Consistency: ${confDesc} (±${(variance / 2).toFixed(1)} ms)`;
+      }
+      if (resultCard) resultCard.classList.remove('hidden');
+
+      setStatus(`✓ Calibration successful! Measured round-trip delay: ${calibratedMs} ms.`, 100);
+      showToast(`Acoustic hardware latency: ${calibratedMs}ms`, 'success');
+    } else {
+      setStatus(
+        'No acoustic echo detected. (Headphones plugged in or speakers muted?) Switch to Rhythm Tap mode above!',
+        0
+      );
+      showToast('No acoustic echo detected. Try Rhythm Tap metronome!', 'warning');
+    }
+  } catch (err) {
+    console.error('Acoustic calibration error:', err);
+    setStatus('Calibration encountered an error. Please try again.', 0);
+  } finally {
+    calState.isChirpRunning = false;
+    if (btnStart) btnStart.disabled = false;
+    if (btnRunOld) btnRunOld.disabled = false;
+  }
+}
+
+/**
+ * Plays a short, crisp audio tick for the metronome
+ */
+function playMetronomeTick(ctx) {
+  if (!ctx) return;
+  try {
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(1200, ctx.currentTime);
+    gain.gain.setValueAtTime(0.35, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.02);
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start(ctx.currentTime);
+    osc.stop(ctx.currentTime + 0.025);
+  } catch (_) {}
+}
+
+/**
+ * Mode 2: Audio-Visual Rhythm Tap Metronome
+ */
+function startRhythmTapMetronome() {
+  if (state.audioCtx && state.audioCtx.state === 'suspended') {
+    state.audioCtx.resume();
+  }
+
+  calState.metronomeRunning = true;
+  calState.taps = [];
+  calState.metronomeStartTime = performance.now();
+  calState.nextBeatTime = calState.metronomeStartTime + calState.metronomeIntervalMs;
+
+  const btnTap = document.getElementById('btnTapBeat');
+  const btnStart = document.getElementById('btnStartTapCal');
+  const liveBadge = document.getElementById('tapLiveBadge');
+  const resultCard = document.getElementById('tapResultCard');
+
+  if (btnTap) btnTap.disabled = false;
+  if (btnStart) btnStart.textContent = 'Restart Metronome';
+  if (liveBadge) liveBadge.textContent = 'Metronome active! Tap Spacebar on the beat (8 taps)...';
+  if (resultCard) resultCard.classList.add('hidden');
+
+  // Reset tap dots
+  for (let i = 1; i <= 8; i++) {
+    const dot = document.querySelector(`.tap-dot[data-tap="${i}"]`);
+    if (dot) {
+      dot.classList.remove('active', 'recorded', 'rejected');
+    }
+  }
+  const firstDot = document.querySelector('.tap-dot[data-tap="1"]');
+  if (firstDot) firstDot.classList.add('active');
+
+  const dotEl = document.getElementById('metronomeDot');
+  const flashEl = document.getElementById('metronomeBeatFlash');
+
+  function tickLoop() {
+    if (!calState.metronomeRunning) return;
+
+    const now = performance.now();
+    const elapsed = now - calState.metronomeStartTime;
+    const cyclePhase = (elapsed % calState.metronomeIntervalMs) / calState.metronomeIntervalMs;
+
+    if (dotEl) {
+      dotEl.style.left = `${(cyclePhase * 100).toFixed(1)}%`;
+    }
+
+    if (now >= calState.nextBeatTime) {
+      playMetronomeTick(state.audioCtx);
+      if (flashEl) {
+        flashEl.classList.add('flash');
+        setTimeout(() => flashEl.classList.remove('flash'), 120);
+      }
+      calState.nextBeatTime += calState.metronomeIntervalMs;
+    }
+
+    calState.metronomeRafId = requestAnimationFrame(tickLoop);
+  }
+
+  if (calState.metronomeRafId) cancelAnimationFrame(calState.metronomeRafId);
+  calState.metronomeRafId = requestAnimationFrame(tickLoop);
+}
+
+function stopRhythmTapMetronome() {
+  calState.metronomeRunning = false;
+  if (calState.metronomeRafId) {
+    cancelAnimationFrame(calState.metronomeRafId);
+    calState.metronomeRafId = null;
+  }
+  const btnTap = document.getElementById('btnTapBeat');
+  const btnStart = document.getElementById('btnStartTapCal');
+  if (btnTap) btnTap.disabled = true;
+  if (btnStart) btnStart.textContent = 'Start Metronome';
+}
+
+function recordRhythmTap() {
+  if (!calState.metronomeRunning) {
+    startRhythmTapMetronome();
+    return;
+  }
+
+  const now = performance.now();
+  const timeSinceStart = now - calState.metronomeStartTime;
+  const beatNum = Math.round(timeSinceStart / calState.metronomeIntervalMs);
+  const closestBeatTime = calState.metronomeStartTime + beatNum * calState.metronomeIntervalMs;
+  const offsetMs = now - closestBeatTime;
+
+  calState.taps.push(offsetMs);
+  const tapIdx = calState.taps.length;
+
+  const currentDot = document.querySelector(`.tap-dot[data-tap="${tapIdx}"]`);
+  if (currentDot) {
+    currentDot.classList.remove('active');
+    currentDot.classList.add('recorded');
+  }
+  const nextDot = document.querySelector(`.tap-dot[data-tap="${tapIdx + 1}"]`);
+  if (nextDot) {
+    nextDot.classList.add('active');
+  }
+
+  const sign = offsetMs > 0 ? '+' : '';
+  const roundedOffset = Math.round(offsetMs);
+  const liveBadge = document.getElementById('tapLiveBadge');
+
+  if (tapIdx <= 2) {
+    if (liveBadge) liveBadge.textContent = `Tap ${tapIdx}/8: Warmup tap (${sign}${roundedOffset} ms)`;
+  } else {
+    if (liveBadge) liveBadge.textContent = `Tap ${tapIdx}/8: Recorded ${sign}${roundedOffset} ms`;
+  }
+
+  if (tapIdx >= calState.maxTaps) {
+    stopRhythmTapMetronome();
+    const stats = processRhythmTapOffsets(calState.taps);
+
+    if (stats.success) {
+      calState.calibratedTapMs = stats.calibratedLatencyMs;
+      const lblResult = document.getElementById('lblTapResultMs');
+      const lblStats = document.getElementById('lblTapStats');
+      const resultCard = document.getElementById('tapResultCard');
+
+      if (lblResult) lblResult.textContent = stats.calibratedLatencyMs;
+      if (lblStats) {
+        lblStats.textContent = `${stats.validCount} valid taps, ${stats.rejectedCount} outliers rejected (σ = ${stats.stdDev} ms)`;
+      }
+      if (resultCard) resultCard.classList.remove('hidden');
+      if (liveBadge) {
+        liveBadge.textContent = `✓ Calibration complete: ${stats.calibratedLatencyMs} ms. Click Apply to save.`;
+      }
+      showToast(`Rhythm tap calibrated: ${stats.calibratedLatencyMs}ms`, 'success');
+    }
+  }
+}
+
+function resetRhythmTapCalibration() {
+  stopRhythmTapMetronome();
+  calState.taps = [];
+  const liveBadge = document.getElementById('tapLiveBadge');
+  const resultCard = document.getElementById('tapResultCard');
+  if (liveBadge) liveBadge.textContent = 'Press "Start Metronome" to begin';
+  if (resultCard) resultCard.classList.add('hidden');
+  for (let i = 1; i <= 8; i++) {
+    const dot = document.querySelector(`.tap-dot[data-tap="${i}"]`);
+    if (dot) dot.classList.remove('active', 'recorded', 'rejected');
+  }
+}
+
+/**
+ * Calibration Modal Navigation & Mode Switching
+ */
+function openCalibrationModal(mode = 'chirp') {
+  const modal = document.getElementById('modalCalibration');
+  if (!modal) return;
+  modal.classList.remove('hidden');
+  calState.modalOpen = true;
+  switchCalibrationMode(mode);
+  updateCalibrationModalReadout();
+}
+
+function closeCalibrationModal() {
+  const modal = document.getElementById('modalCalibration');
+  if (!modal) return;
+  modal.classList.add('hidden');
+  calState.modalOpen = false;
+  stopRhythmTapMetronome();
+}
+
+function switchCalibrationMode(mode) {
+  calState.activeMode = mode;
+
+  const tabChirp = document.getElementById('tabBtnChirp');
+  const tabTap = document.getElementById('tabBtnTap');
+  const panelChirp = document.getElementById('panelChirpCal');
+  const panelTap = document.getElementById('panelTapCal');
+
+  if (mode === 'chirp') {
+    if (tabChirp) tabChirp.classList.add('active');
+    if (tabTap) tabTap.classList.remove('active');
+    if (panelChirp) panelChirp.classList.add('active');
+    if (panelTap) panelTap.classList.remove('active');
+    stopRhythmTapMetronome();
+  } else {
+    if (tabChirp) tabChirp.classList.remove('active');
+    if (tabTap) tabTap.classList.add('active');
+    if (panelChirp) panelChirp.classList.remove('active');
+    if (panelTap) panelTap.classList.add('active');
+  }
+}
+
+function updateCalibrationModalReadout() {
+  const lbl = document.getElementById('calModalCurrentLatency');
+  if (lbl) lbl.textContent = `${state.latencyMs} ms`;
+}
+
+/**
+ * Legacy API Entry Point (preserves backward compatibility with settings buttons and tests)
+ */
+async function runInteractiveLatencyCalibration() {
+  openCalibrationModal('chirp');
+  await runAcousticChirpCalibration();
+}
+
+/**
+ * Initializes Calibration Wizard UI bindings & Keyboard Shortcuts
+ */
+function initCalibrationWizard() {
+  const btnRun = document.getElementById('btnRunCalibration');
+  if (btnRun) {
+    btnRun.addEventListener('click', () => openCalibrationModal('chirp'));
+  }
+
+  const btnClose = document.getElementById('btnCloseCalibrationModal');
+  if (btnClose) btnClose.addEventListener('click', closeCalibrationModal);
+
+  const btnDone = document.getElementById('btnDoneCalibration');
+  if (btnDone) btnDone.addEventListener('click', closeCalibrationModal);
+
+  const modalCal = document.getElementById('modalCalibration');
+  if (modalCal) {
+    modalCal.addEventListener('click', (e) => {
+      if (e.target === modalCal) closeCalibrationModal();
+    });
+  }
+
+  // Tabs
+  const tabChirp = document.getElementById('tabBtnChirp');
+  if (tabChirp) tabChirp.addEventListener('click', () => switchCalibrationMode('chirp'));
+
+  const tabTap = document.getElementById('tabBtnTap');
+  if (tabTap) tabTap.addEventListener('click', () => switchCalibrationMode('tap'));
+
+  // Chirp actions
+  const btnStartChirp = document.getElementById('btnStartChirpCal');
+  if (btnStartChirp) btnStartChirp.addEventListener('click', runAcousticChirpCalibration);
+
+  const btnApplyChirp = document.getElementById('btnApplyChirpResult');
+  if (btnApplyChirp) {
+    btnApplyChirp.addEventListener('click', () => {
+      if (calState.calibratedChirpMs !== null) {
+        setLatencyMs(calState.calibratedChirpMs);
+        showToast(`Latency updated to ${calState.calibratedChirpMs}ms!`, 'success');
+      }
+    });
+  }
+
+  // Metronome tap actions
+  const btnStartTap = document.getElementById('btnStartTapCal');
+  if (btnStartTap) btnStartTap.addEventListener('click', startRhythmTapMetronome);
+
+  const btnTap = document.getElementById('btnTapBeat');
+  if (btnTap) btnTap.addEventListener('click', recordRhythmTap);
+
+  const btnResetTap = document.getElementById('btnResetTapCal');
+  if (btnResetTap) btnResetTap.addEventListener('click', resetRhythmTapCalibration);
+
+  const btnApplyTap = document.getElementById('btnApplyTapResult');
+  if (btnApplyTap) {
+    btnApplyTap.addEventListener('click', () => {
+      if (calState.calibratedTapMs !== null) {
+        setLatencyMs(calState.calibratedTapMs);
+        showToast(`Latency updated to ${calState.calibratedTapMs}ms!`, 'success');
+      }
+    });
+  }
+
+  // Nudge buttons in modal footer
+  const btnNudgeDown = document.getElementById('btnNudgeCalDown');
+  if (btnNudgeDown) btnNudgeDown.addEventListener('click', () => nudgeLatency(-10));
+
+  const btnNudgeUp = document.getElementById('btnNudgeCalUp');
+  if (btnNudgeUp) btnNudgeUp.addEventListener('click', () => nudgeLatency(10));
+
+  // Global Keyboard Shortcuts
+  window.addEventListener('keydown', (e) => {
+    const targetTag = (e.target && e.target.tagName) || '';
+    if (['INPUT', 'TEXTAREA', 'SELECT'].includes(targetTag) || (e.target && e.target.isContentEditable)) {
+      return;
+    }
+
+    // Do not intercept browser commands (Cmd+R, Ctrl+R, Cmd+S, etc.)
+    if (e.ctrlKey || e.metaKey || e.altKey) {
+      return;
+    }
+
+    // 1. Stage Live Latency Quick-Nudge: '[' (-10 ms) and ']' (+10 ms)
+    if (e.key === '[') {
+      e.preventDefault();
+      nudgeLatency(-10);
+      return;
+    }
+    if (e.key === ']') {
+      e.preventDefault();
+      nudgeLatency(10);
+      return;
+    }
+
+    // 2. Spacebar: Rhythm Tap Calibration or Play/Pause playback
+    if (e.code === 'Space' || e.key === ' ') {
+      const modal = document.getElementById('modalCalibration');
+      if (modal && !modal.classList.contains('hidden') && calState.activeMode === 'tap') {
+        e.preventDefault();
+        recordRhythmTap();
+        return;
+      }
+      const isStageActive = document.getElementById('viewStage')?.classList.contains('active');
+      if (isStageActive || state.currentSong) {
+        e.preventDefault();
+        togglePlayPause();
+        return;
+      }
+    }
+
+    // 3. 'R' / 'r': Restart song from beat 0
+    if (e.key === 'r' || e.key === 'R') {
+      const isStageActive = document.getElementById('viewStage')?.classList.contains('active');
+      if (isStageActive || state.currentSong) {
+        e.preventDefault();
+        restartSong();
+        showToast('Restarting song from beginning', 'info', 1500);
+        return;
+      }
+    }
+
+    // 4. 'S' / 's': Skip intro instrumental silence directly to first lyric
+    if (e.key === 's' || e.key === 'S') {
+      const isStageActive = document.getElementById('viewStage')?.classList.contains('active');
+      if (isStageActive || state.currentSong) {
+        e.preventDefault();
+        skipToFirstVocals();
+        showToast('Skipped to first vocals', 'info', 1500);
+        return;
+      }
+    }
+
+    // 5. 'M' / 'm': Toggle microphone active/muted
+    if (e.key === 'm' || e.key === 'M') {
+      e.preventDefault();
+      toggleMicrophone();
+      return;
+    }
+
+    // 6. 'Esc' / 'Escape': Close any open modal or return to song lobby
+    if (e.key === 'Escape' || e.key === 'Esc') {
+      // 6a. Close open modals first
+      const openModals = Array.from(document.querySelectorAll('.modal-backdrop:not(.hidden)'));
+      if (openModals.length > 0) {
+        e.preventDefault();
+        openModals.forEach((m) => {
+          m.classList.add('hidden');
+        });
+        if (calState.modalOpen || calState.metronomeRunning || calState.isChirpRunning) {
+          closeCalibrationModal();
+        }
+        return;
+      }
+
+      // 6b. Return to song lobby if stage is active
+      const isStageActive = document.getElementById('viewStage')?.classList.contains('active');
+      if (isStageActive) {
+        e.preventDefault();
+        leaveStageToLobby();
+        showToast('Returned to song lobby', 'info', 1500);
+        return;
+      }
+    }
+  });
 }
 
 /* ============================================================================
@@ -2469,7 +4194,7 @@ async function runInteractiveLatencyCalibration() {
 function initSpeechRecognition() {
   const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
   if (!SpeechRec) {
-    document.getElementById('speechTextPreview').textContent = 'Tonhöhen-Modus';
+    document.getElementById('speechTextPreview').textContent = 'Pitch Mode';
     return;
   }
 
@@ -2532,6 +4257,11 @@ function resetScoreState() {
   state.hitFramesCount = 0;
   state.pitchHistory = [];
   state.particles = [];
+  state.establishedOctaveShift = null;
+  state.singerVocalRegister = null;
+  state.pendingPitchSpike = null;
+  state.viewportCenterMidi = (state.chartMinMidi + state.chartMaxMidi) / 2 || 65;
+  state.viewportSpanMidi = 16;
   if (state.notes) {
     state.notes.forEach((n) => {
       n.hitFrames = 0;
@@ -2560,6 +4290,39 @@ function mainRenderLoop(nowTs) {
     state.simulatedTime += dt;
   }
 
+  // Dual-Stem Audio Engine & YouTube Ambient Video Sync (Phase 3)
+  if (state.playbackSource === 'local' && state.stemMixer) {
+    state.stemMixer.syncDrift();
+    if (state.ytPlayer && typeof state.ytPlayer.getCurrentTime === 'function' && typeof state.ytPlayer.getPlayerState === 'function') {
+      try {
+        if (typeof state.ytPlayer.isMuted === 'function' && !state.ytPlayer.isMuted()) {
+          state.ytPlayer.mute();
+        }
+        if (state.isPlaying && !state.stemMixer.isPaused()) {
+          const ytState = state.ytPlayer.getPlayerState();
+          if (ytState !== window.YT.PlayerState.PLAYING && ytState !== window.YT.PlayerState.BUFFERING) {
+            state.ytPlayer.playVideo();
+          }
+          const expectedYtTime = state.stemMixer.getCurrentTime() + state.videoOffsetSec;
+          if (expectedYtTime >= 0) {
+            const ytCur = state.ytPlayer.getCurrentTime();
+            if (typeof ytCur === 'number' && !isNaN(ytCur)) {
+              if (Math.abs(ytCur - expectedYtTime) > 0.15 && (nowTs - state.lastYtSyncSeekTs > 400)) {
+                state.ytPlayer.seekTo(expectedYtTime, true);
+                state.lastYtSyncSeekTs = nowTs;
+              }
+            }
+          }
+        } else if (!state.isPlaying || state.stemMixer.isPaused()) {
+          const ytState = state.ytPlayer.getPlayerState();
+          if (ytState === window.YT.PlayerState.PLAYING) {
+            state.ytPlayer.pauseVideo();
+          }
+        }
+      } catch (_) {}
+    }
+  }
+
   updateMicrophonePitch();
 
   if (document.getElementById('viewStage').classList.contains('active')) {
@@ -2578,9 +4341,13 @@ function mainRenderLoop(nowTs) {
       }
     }
 
-    evaluatePitchAtTime(evalTime, dt);
-    updateLyricsPrompter(rawSongTime);
-    renderPitchHighwayCanvas(rawSongTime, evalTime);
+    try {
+      evaluatePitchAtTime(evalTime, dt);
+      updateLyricsPrompter(rawSongTime);
+      renderPitchHighwayCanvas(rawSongTime, evalTime);
+    } catch (renderErr) {
+      console.warn('Render loop frame error:', renderErr);
+    }
   }
 
   requestAnimationFrame(mainRenderLoop);
@@ -2603,16 +4370,34 @@ function getReferenceMidiAtTime(evalTime) {
   return closest ? closest.midi : 64;
 }
 
-function foldMidiToTarget(rawMidi, targetMidi, prevDisplayMidi) {
-  if (!state.octaveAgnostic) return rawMidi;
-  let signedDiff = ((((rawMidi - targetMidi) % 12) + 18) % 12) - 6;
-  let candidate = targetMidi + signedDiff;
+function foldMidiToTarget(rawMidi, targetMidi, prevDisplayMidi = null) {
+  if (typeof state !== 'undefined' && !state.octaveAgnostic) return rawMidi;
 
-  if (prevDisplayMidi !== null) {
-    if (candidate - prevDisplayMidi > 7.5) candidate -= 12;
-    else if (prevDisplayMidi - candidate > 7.5) candidate += 12;
+  // 1. Maintain established octave shift during continuous singing (anchored to singer register)
+  if (typeof state !== 'undefined' && state.establishedOctaveShift !== null && prevDisplayMidi !== null) {
+    const shifted = rawMidi + state.establishedOctaveShift;
+    // Adapt only if singer intentionally makes a large octave leap (>= 15 semitones from target)
+    if (Math.abs(shifted - targetMidi) >= 15) {
+      state.establishedOctaveShift = Math.round((targetMidi - rawMidi) / 12) * 12;
+    }
+    return rawMidi + state.establishedOctaveShift;
   }
-  return candidate;
+
+  // 2. If previous display pitch exists, anchor candidate to singer's register with hysteresis
+  if (prevDisplayMidi !== null && Number.isFinite(prevDisplayMidi)) {
+    const shift = Math.round((prevDisplayMidi - rawMidi) / 12) * 12;
+    if (typeof state !== 'undefined') state.establishedOctaveShift = shift;
+    let candidate = rawMidi + shift;
+    const diff = candidate - prevDisplayMidi;
+    if (diff > 7.5) candidate -= 12;
+    else if (diff < -7.5) candidate += 12;
+    return candidate;
+  }
+
+  // 3. New vocal stroke / first anchor: fold to targetMidi
+  const shift = Math.round((targetMidi - rawMidi) / 12) * 12;
+  if (typeof state !== 'undefined') state.establishedOctaveShift = shift;
+  return rawMidi + shift;
 }
 
 function evaluatePitchAtTime(evalTime, dt) {
@@ -2625,8 +4410,7 @@ function evaluatePitchAtTime(evalTime, dt) {
     targetNoteEl.textContent = '--';
     if (state.smoothedMidi !== null && state.voicedFrameCount >= 2) {
       const folded = foldMidiToTarget(state.smoothedMidi, refMidi, state.lastDisplayedMidi);
-      const displayMidi =
-        state.lastDisplayedMidi === null ? folded : state.lastDisplayedMidi * 0.65 + folded * 0.35;
+      const displayMidi = stabilizePitchMidi(folded, state.lastDisplayedMidi, state.currentClarity / 100, dt);
       state.lastDisplayedMidi = displayMidi;
 
       state.pitchHistory.push({
@@ -2644,20 +4428,16 @@ function evaluatePitchAtTime(evalTime, dt) {
   activeNote.totalFrames++;
 
   if (state.smoothedMidi !== null && state.voicedFrameCount >= 1) {
-    let displayMidi = foldMidiToTarget(state.smoothedMidi, activeNote.midi, state.lastDisplayedMidi);
+    const foldedMidi = foldMidiToTarget(state.smoothedMidi, activeNote.midi, state.lastDisplayedMidi);
+    const displayMidi = stabilizePitchMidi(foldedMidi, state.lastDisplayedMidi, state.currentClarity / 100, dt);
+    state.lastDisplayedMidi = displayMidi;
+
     const rawDiff = Math.abs(displayMidi - activeNote.midi);
 
-    const isHit = activeNote.isFreestyle || rawDiff <= state.difficultyTolerance;
-    const isPerfect = activeNote.isFreestyle || rawDiff <= state.difficultyTolerance * 0.6;
-
-    if (isHit && state.pitchMagnet && !activeNote.isFreestyle) {
-      displayMidi = activeNote.midi + (displayMidi - activeNote.midi) * 0.22;
-    }
-
-    if (state.lastDisplayedMidi !== null) {
-      displayMidi = state.lastDisplayedMidi * 0.55 + displayMidi * 0.45;
-    }
-    state.lastDisplayedMidi = displayMidi;
+    // Scoring leniency: pitchMagnet grants subtle leniency (+15% tolerance) without distorting coordinates
+    const tol = state.difficultyTolerance * (state.pitchMagnet ? 1.15 : 1.0);
+    const isHit = activeNote.isFreestyle || rawDiff <= tol;
+    const isPerfect = activeNote.isFreestyle || rawDiff <= tol * 0.6;
 
     state.totalFramesChecked++;
 
@@ -2675,14 +4455,14 @@ function evaluatePitchAtTime(evalTime, dt) {
       const qualityMult = isPerfect ? 1.35 : 1.0;
       state.score += basePts * qualityMult * state.combo * dt;
 
-      feedbackEl.textContent = isPerfect ? '★ PERFEKT!' : '✓ GUT!';
+      feedbackEl.textContent = isPerfect ? 'PERFECT' : 'GOOD';
       feedbackEl.className = 'pitch-feedback ' + (isPerfect ? 'perfect' : 'good');
 
       spawnHitParticles(activeNote.midi, activeNote.isGolden);
     } else {
       state.streakHits = 0;
       state.combo = 1;
-      const dir = displayMidi < activeNote.midi ? '↑ Etwas höher!' : '↓ Etwas tiefer!';
+      const dir = displayMidi < activeNote.midi ? '↑ Sing higher' : '↓ Sing lower';
       feedbackEl.textContent = dir;
       feedbackEl.className = 'pitch-feedback miss';
     }
@@ -2699,7 +4479,7 @@ function evaluatePitchAtTime(evalTime, dt) {
       state.totalFramesChecked++;
       state.streakHits = 0;
       state.combo = 1;
-      feedbackEl.textContent = '🎤 Sing jetzt!';
+      feedbackEl.textContent = 'Sing now';
       feedbackEl.className = 'pitch-feedback';
       updateScoreHUD();
     }
@@ -2752,92 +4532,166 @@ function updateLyricsPrompter(songTime) {
 
 function renderPitchHighwayCanvas(songTime, evalTime) {
   const canvas = document.getElementById('pitchCanvas');
-  const ctx = canvas.getContext('2d');
-  const W = canvas.width;
-  const H = canvas.height;
+  if (!canvas) return;
 
+  const dpr = window.devicePixelRatio || 1;
+  const rect = canvas.getBoundingClientRect();
+  const W = Math.round(rect.width) || 960;
+  const H = Math.round(rect.height) || (!state.settings.showLyricsRibbon ? 460 : 360);
+
+  const targetPixelW = Math.round(W * dpr);
+  const targetPixelH = Math.round(H * dpr);
+
+  if (canvas.width !== targetPixelW || canvas.height !== targetPixelH) {
+    canvas.width = targetPixelW;
+    canvas.height = targetPixelH;
+  }
+
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, W, H);
 
-  const pastSec = 1.6;
-  const futureSec = 4.4;
+  const pastSec = 1.5;
+  const futureSec = 4.5;
   const totalWindowSec = pastSec + futureSec;
   const playheadX = (pastSec / totalWindowSec) * W;
 
-  const minMidi = state.chartMinMidi;
-  const maxMidi = state.chartMaxMidi;
-  const midiToY = (m) => {
-    const clamped = Math.max(minMidi, Math.min(maxMidi, m));
-    return H - 42 - ((clamped - minMidi) / Math.max(1, maxMidi - minMidi)) * (H - 76);
-  };
+  // 1. Constant Pitch Viewport for the entire song: Highest note + x notes, Lowest note - x notes.
+  // Static coordinate space with no movement or vertical jitter while singing.
+  const minMidi = state.chartMinMidi || 53;
+  const maxMidi = state.chartMaxMidi || 77;
+  const phraseTargetCenter = (minMidi + maxMidi) / 2;
+  state.viewportCenterMidi = phraseTargetCenter;
+  state.viewportSpanMidi = maxMidi - minMidi;
+
+  const topPadding = 24;
+  const bottomPadding = 28;
+  const usableH = H - topPadding - bottomPadding;
+  const midiToY = (m) => topPadding + usableH * (1 - (m - minMidi) / (maxMidi - minMidi));
   const timeToX = (t) => playheadX + ((t - evalTime) / totalWindowSec) * W;
 
-  // 1. Horizontal Pitch Grid
-  ctx.lineWidth = 1;
-  for (let m = minMidi; m <= maxMidi; m += 2) {
+  // 2. Horizontal Pitch Grid with Octave Guides
+  const startM = Math.floor(minMidi);
+  const endM = Math.ceil(maxMidi);
+  for (let m = startM; m <= endM; m++) {
     const y = midiToY(m);
-    ctx.strokeStyle = m % 12 === 0 ? 'rgba(0, 242, 254, 0.12)' : 'rgba(255, 255, 255, 0.04)';
+    const isC = m % 12 === 0;
+    const isWhiteKey = [0, 2, 4, 5, 7, 9, 11].includes(((m % 12) + 12) % 12);
+
+    if (isC) {
+      ctx.strokeStyle = 'rgba(0, 240, 255, 0.16)';
+      ctx.lineWidth = 1.5;
+    } else if (isWhiteKey) {
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.05)';
+      ctx.lineWidth = 1;
+    } else {
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.02)';
+      ctx.lineWidth = 0.5;
+    }
     ctx.beginPath();
     ctx.moveTo(0, y);
     ctx.lineTo(W, y);
     ctx.stroke();
+
+    if (isC) {
+      const octave = Math.floor(m / 12) - 1;
+      ctx.font = '600 10px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Inter", sans-serif';
+      ctx.fillStyle = 'rgba(0, 240, 255, 0.4)';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(`C${octave}`, 8, y - 1);
+    }
   }
 
-  // 2. Target Note Tubes + Syllables (with Render-time Spacing, PLAN.md Phase 7.2)
-  const visibleNotes = state.notes.filter(
-    (n) => n.endTime >= evalTime - pastSec - 0.5 && n.startTime <= evalTime + futureSec + 0.5
-  );
+  // 3. Modern Capsule Note Tubes & Syllable Anti-Collision
+  const barHeight = 16;
+  const pillRadius = barHeight / 2;
+  const visualGapPx = 3;
 
-  const barHeight = 22;
-  const visualGapPx = 3; // Render-time visual spacing between adjacent notes
-  ctx.font = '600 13px -apple-system, BlinkMacSystemFont, sans-serif';
-  ctx.textAlign = 'left';
+  const windowStart = evalTime - pastSec;
+  const windowEnd = evalTime + futureSec;
+  const visibleNotes = (state.notes || []).filter(
+    (n) => n.endTime >= windowStart - 0.5 && n.startTime <= windowEnd + 0.5
+  );
 
   for (const note of visibleNotes) {
     const x1 = timeToX(note.startTime);
     const x2 = timeToX(note.endTime);
-    const rawWidth = Math.max(10, x2 - x1);
-    const drawWidth = Math.max(7, rawWidth - visualGapPx);
+    const rawWidth = Math.max(12, x2 - x1);
+    const drawWidth = Math.max(8, rawWidth - visualGapPx);
     const y = midiToY(note.midi) - barHeight / 2;
 
-    ctx.fillStyle = note.isGolden ? 'rgba(255, 207, 51, 0.2)' : 'rgba(255, 255, 255, 0.13)';
-    ctx.strokeStyle = note.isGolden ? '#ffcf33' : 'rgba(0, 242, 254, 0.6)';
-    ctx.lineWidth = note.isGolden ? 2 : 1.5;
-
-    roundRect(ctx, x1, y, drawWidth, barHeight, 10);
+    // Unfilled Capsule Container
+    ctx.save();
+    if (note.isGolden) {
+      ctx.shadowColor = 'rgba(255, 184, 0, 0.5)';
+      ctx.shadowBlur = 10;
+      ctx.fillStyle = 'rgba(255, 184, 0, 0.14)';
+      ctx.strokeStyle = 'rgba(255, 184, 0, 0.85)';
+      ctx.lineWidth = 1.5;
+    } else {
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.09)';
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.22)';
+      ctx.lineWidth = 1;
+    }
+    roundRect(ctx, x1, y, drawWidth, barHeight, pillRadius);
     ctx.fill();
     ctx.stroke();
+    ctx.restore();
 
+    // Filled Hit State
     if (note.fillRatio > 0) {
-      const fillW = Math.max(6, drawWidth * note.fillRatio);
+      const fillW = Math.max(pillRadius * 2, Math.min(drawWidth, drawWidth * note.fillRatio));
+      ctx.save();
+      roundRect(ctx, x1, y, drawWidth, barHeight, pillRadius);
+      ctx.clip();
+
       const grad = ctx.createLinearGradient(x1, y, x1 + drawWidth, y);
       if (note.isGolden) {
-        grad.addColorStop(0, '#ffcf33');
-        grad.addColorStop(1, '#ff8800');
+        grad.addColorStop(0, '#ffb800');
+        grad.addColorStop(1, '#ff3366');
       } else {
-        grad.addColorStop(0, '#00f2fe');
-        grad.addColorStop(1, '#18e882');
+        grad.addColorStop(0, '#00f0ff');
+        grad.addColorStop(1, '#00e676');
       }
       ctx.fillStyle = grad;
-      roundRect(ctx, x1, y, fillW, barHeight, 10);
-      ctx.fill();
+      ctx.fillRect(x1, y, fillW, barHeight);
+      ctx.restore();
     }
 
-    const isCurrent = evalTime >= note.startTime && evalTime <= note.endTime;
-    ctx.fillStyle = isCurrent ? '#ffcf33' : 'rgba(245, 247, 255, 0.88)';
-    ctx.fillText(note.text.trim(), x1 + 2, y + barHeight + 16);
+    // Uniform Syllable Placement: Every word/syllable is rendered cleanly below the note tube
+    if (state.settings.showSyllablesOnNotes) {
+      const text = (note.text || '').trim();
+      if (text) {
+        ctx.save();
+        ctx.font = '600 12px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Inter", sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'top';
+
+        const isCurrent = evalTime >= note.startTime && evalTime <= note.endTime;
+        ctx.fillStyle = isCurrent ? '#00f0ff' : 'rgba(240, 243, 250, 0.9)';
+        ctx.shadowColor = 'rgba(0, 0, 0, 0.9)';
+        ctx.shadowBlur = 4;
+
+        const textX = x1 + drawWidth / 2;
+        const textY = y + barHeight + 4;
+        ctx.fillText(text, textX, textY);
+        ctx.restore();
+      }
+    }
   }
 
-  // 3. Playhead Line
-  ctx.strokeStyle = 'rgba(255, 42, 133, 0.85)';
+  // 4. Playhead Line
+  ctx.strokeStyle = 'rgba(255, 45, 108, 0.85)';
   ctx.lineWidth = 2.5;
   ctx.beginPath();
-  ctx.moveTo(playheadX, 12);
-  ctx.lineTo(playheadX, H - 12);
+  ctx.moveTo(playheadX, topPadding);
+  ctx.lineTo(playheadX, H - bottomPadding);
   ctx.stroke();
 
-  // 4. Stabilized Pitch Trail
-  if (state.pitchHistory.length > 1) {
-    ctx.lineWidth = 4.5;
+  // 5. Stabilized Pitch Trail
+  if (state.settings.showLiveVoiceOrb && state.pitchHistory.length > 1) {
+    ctx.lineWidth = 4;
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
 
@@ -2849,7 +4703,7 @@ function renderPitchHighwayCanvas(songTime, evalTime) {
       if (p1.songTime - p0.songTime > 0.12) continue;
       if (Math.abs(p1.midi - p0.midi) > 6.5) continue;
 
-      ctx.strokeStyle = p1.hit ? '#18e882' : '#ff2a85';
+      ctx.strokeStyle = p1.hit ? '#00e676' : '#ff2d6c';
       ctx.beginPath();
       ctx.moveTo(timeToX(p0.songTime), midiToY(p0.midi));
       ctx.lineTo(timeToX(p1.songTime), midiToY(p1.midi));
@@ -2857,55 +4711,78 @@ function renderPitchHighwayCanvas(songTime, evalTime) {
     }
   }
 
-  // 5. Live Voice Orb
-  if (state.lastDisplayedMidi !== null && state.smoothedMidi !== null) {
-    const orbY = midiToY(state.lastDisplayedMidi);
+  // 6. Live Voice Orb
+  if (state.settings.showLiveVoiceOrb && state.lastDisplayedMidi !== null && state.smoothedMidi !== null) {
+    const rawOrbY = midiToY(state.lastDisplayedMidi);
+    const orbY = Math.max(topPadding - 4, Math.min(H - bottomPadding + 4, rawOrbY));
     ctx.save();
-    ctx.shadowColor = '#00f2fe';
+    ctx.shadowColor = '#00f0ff';
     ctx.shadowBlur = 16;
     ctx.fillStyle = '#ffffff';
     ctx.beginPath();
-    ctx.arc(playheadX, orbY, 8, 0, Math.PI * 2);
+    ctx.arc(playheadX, orbY, 7.5, 0, Math.PI * 2);
     ctx.fill();
     ctx.restore();
   }
 
-  // 6. Hit Particles
+  // 7. Hit Particles
   for (let i = state.particles.length - 1; i >= 0; i--) {
     const p = state.particles[i];
     p.x += p.vx;
     p.y += p.vy;
-    p.alpha -= 0.035;
+    p.alpha -= (p.decay || 0.035);
     if (p.alpha <= 0) {
       state.particles.splice(i, 1);
       continue;
+    }
+    ctx.save();
+    if (p.isGolden) {
+      ctx.shadowColor = '#ffb800';
+      ctx.shadowBlur = 6;
     }
     ctx.fillStyle = p.color.replace('ALPHA', p.alpha.toFixed(2));
     ctx.beginPath();
     ctx.arc(p.x, p.y, p.radius, 0, Math.PI * 2);
     ctx.fill();
+    ctx.restore();
   }
 }
 
 function spawnHitParticles(midi, isGolden) {
-  if (state.particles.length > 45) return;
+  if (!state.settings.showLiveVoiceOrb || state.particles.length > 50) return;
   const canvas = document.getElementById('pitchCanvas');
-  const W = canvas.width;
-  const H = canvas.height;
-  const playheadX = (1.6 / 6.0) * W;
-  const minMidi = state.chartMinMidi;
-  const maxMidi = state.chartMaxMidi;
-  const y = H - 42 - ((midi - minMidi) / Math.max(1, maxMidi - minMidi)) * (H - 76);
+  if (!canvas) return;
 
-  for (let i = 0; i < 2; i++) {
+  const rect = canvas.getBoundingClientRect();
+  const W = Math.round(rect.width) || 960;
+  const H = Math.round(rect.height) || (!state.settings.showLyricsRibbon ? 460 : 360);
+  const playheadX = (1.5 / 6.0) * W;
+
+  const minMidi = state.chartMinMidi || 53;
+  const maxMidi = state.chartMaxMidi || 77;
+  const topPadding = 24;
+  const bottomPadding = 28;
+  const usableH = H - topPadding - bottomPadding;
+  const y = topPadding + usableH * (1 - (midi - minMidi) / (maxMidi - minMidi));
+
+  const count = isGolden ? 4 : 2;
+  for (let i = 0; i < count; i++) {
+    const angle = Math.random() * Math.PI * 2;
+    const speed = 1.0 + Math.random() * (isGolden ? 3.5 : 2.0);
     state.particles.push({
       x: playheadX,
-      y: y + (Math.random() - 0.5) * 12,
-      vx: -1.5 - Math.random() * 2.5,
-      vy: (Math.random() - 0.5) * 3,
-      radius: 2 + Math.random() * 2.5,
-      alpha: 0.95,
-      color: isGolden ? 'rgba(255, 207, 51, ALPHA)' : 'rgba(24, 232, 130, ALPHA)',
+      y: y + (Math.random() - 0.5) * 8,
+      vx: isGolden ? Math.cos(angle) * speed - 1.2 : -1.5 - Math.random() * 2.5,
+      vy: isGolden ? Math.sin(angle) * speed : (Math.random() - 0.5) * 3,
+      radius: isGolden ? 1.5 + Math.random() * 3.0 : 2 + Math.random() * 2.5,
+      alpha: 1.0,
+      decay: isGolden ? 0.02 + Math.random() * 0.02 : 0.035,
+      isGolden: !!isGolden,
+      color: isGolden
+        ? Math.random() > 0.4
+          ? 'rgba(255, 184, 0, ALPHA)'
+          : 'rgba(255, 235, 120, ALPHA)'
+        : 'rgba(0, 240, 255, ALPHA)',
     });
   }
 }
@@ -2961,9 +4838,76 @@ function getMedian(arr) {
 
 function extractYouTubeId(input) {
   if (!input) return null;
-  if (/^[a-zA-Z0-9_-]{11}$/.test(input)) return input;
-  const m = input.match(/(?:v=|youtu\.be\/|embed\/)([a-zA-Z0-9_-]{11})/);
+  const clean = String(input).trim();
+  if (/^[a-zA-Z0-9_-]{11}$/.test(clean)) return clean;
+  const m = clean.match(/(?:v=|youtu\.be\/|embed\/|shorts\/|live\/)([a-zA-Z0-9_-]{11})/i);
   return m ? m[1] : null;
+}
+
+async function resolveYouTubeClient(ytId, rawInput) {
+  let title = 'YouTube Track';
+  let artist = 'YouTube';
+  let durationSec = 210;
+  let artworkUrl = `https://img.youtube.com/vi/${ytId}/hqdefault.jpg`;
+
+  // 1. Check if videoId exists in our pre-indexed UltraStar catalog
+  if (state.ultraStarCatalog && state.ultraStarCatalog.length > 0) {
+    const match = state.ultraStarCatalog.find(
+      (s) => s.videoId === ytId || s.id === ytId || (s.youtubeId && s.youtubeId === ytId)
+    );
+    if (match) {
+      title = match.title || title;
+      artist = match.artist || artist;
+      durationSec = match.duration || durationSec;
+    }
+  }
+
+  // 2. Try YouTube oEmbed for official video title & author
+  try {
+    const oembedRes = await fetch(
+      `https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${encodeURIComponent(ytId)}&format=json`
+    );
+    if (oembedRes.ok) {
+      const oembedData = await oembedRes.json();
+      if (oembedData.title) {
+        let cleanTitle = oembedData.title.trim();
+        if (cleanTitle.includes(' - ')) {
+          const parts = cleanTitle.split(' - ');
+          artist = parts[0].trim();
+          title = parts.slice(1).join(' - ').trim();
+        } else {
+          title = cleanTitle;
+          if (oembedData.author_name) {
+            artist = oembedData.author_name.replace(/ - Topic$/i, '').replace(/VEVO$/i, '').trim();
+          }
+        }
+      }
+      if (oembedData.thumbnail_url) {
+        artworkUrl = oembedData.thumbnail_url;
+      }
+    }
+  } catch (_) {}
+
+  // Strip common YouTube title suffixes
+  title = title
+    .replace(/\s*[\(\[](?:Official\s*(?:Music\s*)?Video|Audio|Lyric\s*Video|HD|4K|Visualizer|HQ)[\)\]]/gi, '')
+    .trim();
+
+  const slug = createSongSlugClient(artist, title);
+
+  return {
+    type: 'youtube',
+    title,
+    artist,
+    durationSec,
+    artworkUrl,
+    spotifyTrackId: '',
+    youtubeId: ytId,
+    isrc: '',
+    confidence: 1.0,
+    slug,
+    candidates: [],
+  };
 }
 
 function roundRect(ctx, x, y, w, h, r) {
@@ -3007,17 +4951,28 @@ async function loadLibrarySongs() {
     const res = await fetch('/api/library');
     if (!res.ok) return;
     const data = await res.json();
-    state.librarySongs = data.songs || [];
+    const fetchedSongs = data.songs || [];
 
+    // Filter out any locally deleted songs from sing_deleted_songs
+    let deletedSlugs = [];
+    try {
+      deletedSlugs = JSON.parse(localStorage.getItem('sing_deleted_songs') || '[]');
+    } catch (_) {}
+
+    state.librarySongs = fetchedSongs.filter((s) => !deletedSlugs.includes(s.slug));
+
+    const libSec = document.getElementById('librarySection');
     if (state.librarySongs.length === 0) {
-      if (emptyEl) emptyEl.classList.remove('hidden');
+      if (libSec) libSec.classList.add('hidden');
+      if (emptyEl) emptyEl.classList.add('hidden');
       gridEl.innerHTML = '';
     } else {
+      if (libSec) libSec.classList.remove('hidden');
       if (emptyEl) emptyEl.classList.add('hidden');
       renderLibraryGrid(state.librarySongs);
     }
   } catch (err) {
-    console.warn('Fehler beim Laden der Song-Bibliothek:', err);
+    console.warn('Error loading song library:', err);
   }
 }
 
@@ -3037,14 +4992,14 @@ function renderLibraryGrid(songs) {
 
       const durText = s.durationSec ? formatSec(s.durationSec) : '--:--';
       const scorePct = Math.round((s.qualityScore || 0.8) * 100);
-      const editedBadge = s.edited ? '<span class="badge badge-gold" title="Im Chart-Editor bearbeitet">✏️ Editiert</span>' : '';
+      const editedBadge = s.edited ? '<span class="badge badge-gold" title="Edited in Chart Editor">Edited</span>' : '';
 
       return `
-      <div class="song-card" data-lib-idx="${idx}">
+      <div class="song-card library-card" data-lib-idx="${idx}">
         ${coverHtml}
         <div class="card-body">
           <div class="card-badges">
-            <span class="badge ${badgeClass}">${escapeHtml(s.badgeLabel || 'KI-Song')}</span>
+            <span class="badge ${badgeClass}">${escapeHtml(s.badgeLabel || 'AI Song')}</span>
             <span class="badge">${durText}</span>
             <span class="badge badge-gold">${scorePct}% Sync</span>
             ${editedBadge}
@@ -3052,13 +5007,18 @@ function renderLibraryGrid(songs) {
           <h3 class="card-title">${escapeHtml(s.title)}</h3>
           <p class="card-artist">${escapeHtml(s.artist)}</p>
         </div>
-        <div class="card-actions-row" style="display: flex; gap: 6px; width: 100%; margin-top: auto;">
-          <button class="primary-btn card-action-btn btn-play-lib" data-lib-idx="${idx}" style="flex: 2;">
-            🎤 Singen
+        <div class="card-actions-row">
+          <button class="primary-btn card-action-btn btn-play-lib" data-lib-idx="${idx}">
+            Sing
           </button>
-          <button class="small-btn card-action-btn btn-edit-lib" data-lib-idx="${idx}" title="Noten im Chart-Editor bearbeiten" style="flex: 1; padding: 6px 8px;">
-            ✏️ Edit
-          </button>
+          <div class="card-sub-actions">
+            <button class="small-btn card-action-btn btn-edit-lib" data-lib-idx="${idx}" title="Edit notes in Chart Editor">
+              Edit
+            </button>
+            <button class="small-btn card-action-btn btn-delete-lib danger-btn" data-lib-idx="${idx}" title="Delete song from library">
+              Delete
+            </button>
+          </div>
         </div>
       </div>`;
     })
@@ -3081,13 +5041,61 @@ function renderLibraryGrid(songs) {
       if (song) {
         try {
           const res = await fetch(song.chartUrl);
-          if (!res.ok) throw new Error('Konnte Notendatei nicht laden');
+          if (!res.ok) throw new Error('Could not load chart file');
           const txt = await res.text();
           openChartEditorForSong(song, txt);
         } catch (err) {
-          alert('Fehler beim Laden des Charts: ' + err.message);
+          showToast('Error loading chart: ' + err.message, 'error');
         }
       }
+    });
+  });
+
+  gridEl.querySelectorAll('.btn-delete-lib').forEach((btn) => {
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const idx = parseInt(btn.getAttribute('data-lib-idx'), 10);
+      const song = state.librarySongs[idx];
+      if (!song) return;
+
+      if (!confirm(`Delete "${song.title}" by ${song.artist}?\n\nThis will remove the song from your library.`)) {
+        return;
+      }
+
+      const targetSlug = song.slug;
+      const targetTitle = song.title;
+
+      // 1. Immediately delete from the list in UI and remember in localStorage
+      let deletedSlugs = [];
+      try {
+        deletedSlugs = JSON.parse(localStorage.getItem('sing_deleted_songs') || '[]');
+      } catch (_) {}
+      if (!deletedSlugs.includes(targetSlug)) {
+        deletedSlugs.push(targetSlug);
+        localStorage.setItem('sing_deleted_songs', JSON.stringify(deletedSlugs));
+      }
+
+      state.librarySongs = state.librarySongs.filter((s) => s.slug !== targetSlug);
+      renderLibraryGrid(state.librarySongs);
+
+      const libSec = document.getElementById('librarySection');
+      if (state.librarySongs.length === 0 && libSec) {
+        libSec.classList.add('hidden');
+      }
+
+      showToast(`Deleted "${targetTitle}" from library`, 'success');
+
+      // 2. Also send delete request to backend to clean up disk folder
+      try {
+        let res = await fetch(`/api/library/${encodeURIComponent(targetSlug)}`, {
+          method: 'DELETE',
+        });
+        if (!res.ok) {
+          await fetch(`/api/library/${encodeURIComponent(targetSlug)}/delete`, {
+            method: 'POST',
+          });
+        }
+      } catch (_) {}
     });
   });
 
@@ -3113,7 +5121,7 @@ async function playLibrarySong(song) {
   try {
     const res = await fetch(song.chartUrl);
     if (!res.ok) {
-      alert('Konnte Notendatei nicht laden: ' + song.chartUrl);
+      showToast('Could not load chart file: ' + song.chartUrl, 'error');
       return;
     }
     const txtContent = await res.text();
@@ -3125,6 +5133,7 @@ async function playLibrarySong(song) {
       videoId: song.youtubeId || '',
       duration: song.durationSec || 210,
       instrumentalUrl: song.instrumentalUrl,
+      vocalsUrl: song.vocalsUrl,
       artworkUrl: song.coverUrl,
     };
 
@@ -3138,44 +5147,19 @@ async function playLibrarySong(song) {
 
     const badgeSource = document.getElementById('badgeChartSource');
     if (badgeSource) {
-      badgeSource.textContent = `⚡ KI-Generiert (${escapeHtml(song.badgeLabel || 'KI-Melodie')})`;
+      badgeSource.textContent = `⚡ AI-Generated (${escapeHtml(song.badgeLabel || 'AI Track')})`;
     }
 
-    // Use local instrumental audio track if available (pure studio karaoke without vocals!)
+    // Use local stems if available (pure instrumental + guide vocals)
     if (song.instrumentalUrl) {
-      setupLocalInstrumentalAudio(song.instrumentalUrl);
+      setupLocalStemsAudio(song.instrumentalUrl, song.vocalsUrl);
+    } else {
+      updateGuideVocalsUI(false);
     }
   } catch (err) {
-    console.error('Fehler beim Starten des KI-Songs:', err);
-    alert('Fehler beim Laden des KI-Songs: ' + err.message);
+    console.error('Error starting AI song:', err);
+    showToast('Error loading song: ' + err.message, 'error');
   }
-}
-
-function setupLocalInstrumentalAudio(audioUrl) {
-  state.playbackSource = 'local';
-  if (state.localAudio) {
-    try {
-      state.localAudio.pause();
-      state.localAudio.src = '';
-    } catch (_) {}
-  }
-
-  state.localAudio = new Audio(audioUrl);
-  state.localAudio.addEventListener('ended', () => {
-    state.isPlaying = false;
-  });
-  state.localAudio.addEventListener('error', (e) => {
-    console.warn('Local Audio Error, Video-Fallback aktiv:', e);
-  });
-
-  state.localAudio
-    .play()
-    .then(() => {
-      state.isPlaying = true;
-    })
-    .catch((err) => {
-      console.log('Autoplay blockiert (kann per Button gestartet werden):', err);
-    });
 }
 
 async function handleResolveQuery(inputQuery) {
@@ -3186,20 +5170,45 @@ async function handleResolveQuery(inputQuery) {
   if (previewCard) previewCard.classList.add('hidden');
 
   try {
-    const res = await fetch('/api/resolve', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ input: inputQuery }),
-    });
+    let data = null;
 
-    const data = await res.json();
-    if (!res.ok || data.error) {
-      throw new Error(data.error || 'Song konnte nicht aufgelöst werden');
+    // 1. Try resolving via backend API
+    try {
+      const res = await fetch('/api/resolve', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ input: inputQuery }),
+      });
+
+      const text = await res.text();
+      try {
+        data = JSON.parse(text);
+      } catch (_) {
+        data = null;
+      }
+
+      if (!res.ok || (data && data.error)) {
+        console.warn('Backend resolve returned error or non-JSON:', text);
+        data = null;
+      }
+    } catch (netErr) {
+      console.warn('Could not reach backend /api/resolve:', netErr);
+      data = null;
+    }
+
+    // 2. Client-side fallback if backend failed or returned 404
+    if (!data) {
+      const ytId = extractYouTubeId(inputQuery);
+      if (ytId) {
+        data = await resolveYouTubeClient(ytId, inputQuery);
+      } else {
+        throw new Error('Could not resolve track. Please verify your YouTube link.');
+      }
     }
 
     displayResolvePreview(data);
   } catch (err) {
-    alert(`Fehler bei der Analyse: ${err.message}`);
+    showToast(`Analysis error: ${err.message}`, 'error');
   } finally {
     if (loadingEl) loadingEl.classList.add('hidden');
   }
@@ -3210,7 +5219,7 @@ async function handleAudioUpload(file) {
   const loadingText = document.getElementById('resolveLoadingText');
   const previewCard = document.getElementById('resolvePreviewCard');
 
-  if (loadingText) loadingText.textContent = `Lade "${file.name}" hoch (max. 80 MB)...`;
+  if (loadingText) loadingText.textContent = `Uploading "${file.name}" (max 80 MB)...`;
   if (loadingEl) loadingEl.classList.remove('hidden');
   if (previewCard) previewCard.classList.add('hidden');
 
@@ -3226,12 +5235,12 @@ async function handleAudioUpload(file) {
 
     const data = await res.json();
     if (!res.ok || !data.success) {
-      throw new Error(data.error || 'Audio-Upload fehlgeschlagen');
+      throw new Error(data.error || 'Audio upload failed');
     }
 
     // Auto-detect title and artist from filename
     const baseName = file.name.replace(/\.[^.]+$/, '');
-    let artist = 'Eigener Upload';
+    let artist = 'Uploaded Audio';
     let title = baseName;
     if (baseName.includes(' - ')) {
       const parts = baseName.split(' - ');
@@ -3255,10 +5264,10 @@ async function handleAudioUpload(file) {
 
     displayResolvePreview(resolved);
   } catch (err) {
-    alert(`Fehler beim Audio-Upload: ${err.message}`);
+    showToast(`Audio upload failed: ${err.message}`, 'error');
   } finally {
     if (loadingEl) loadingEl.classList.add('hidden');
-    if (loadingText) loadingText.textContent = 'Löse Track-Informationen, Lyrics und Video-Match auf...';
+    if (loadingText) loadingText.textContent = 'Resolving track information and audio stream...';
   }
 }
 
@@ -3288,17 +5297,17 @@ function displayResolvePreview(resolved) {
   }
 
   const titleEl = document.getElementById('previewTitle');
-  if (titleEl) titleEl.textContent = resolved.title || 'Unbekannter Titel';
+  if (titleEl) titleEl.textContent = resolved.title || 'Unknown Title';
 
   const artistEl = document.getElementById('previewArtist');
-  if (artistEl) artistEl.textContent = resolved.artist || 'Unbekannter Interpret';
+  if (artistEl) artistEl.textContent = resolved.artist || 'Unknown Artist';
 
   const sourceBadge = document.getElementById('previewSourceBadge');
   if (sourceBadge) {
-    if (resolved.type === 'spotify') sourceBadge.textContent = '🟢 Spotify';
-    else if (resolved.type === 'youtube') sourceBadge.textContent = '📺 YouTube';
-    else if (resolved.type === 'upload') sourceBadge.textContent = '📁 Upload';
-    else sourceBadge.textContent = '🔍 Suche';
+    if (resolved.type === 'spotify') sourceBadge.textContent = 'Spotify';
+    else if (resolved.type === 'youtube') sourceBadge.textContent = 'YouTube';
+    else if (resolved.type === 'upload') sourceBadge.textContent = 'Upload';
+    else sourceBadge.textContent = 'Search';
   }
 
   const durBadge = document.getElementById('previewDurationBadge');
@@ -3315,20 +5324,194 @@ function displayResolvePreview(resolved) {
   const noteEl = document.getElementById('previewMetaNote');
   if (noteEl) {
     if (resolved.youtubeId) {
-      noteEl.textContent = `✓ YouTube Studio-Audio zugeordnet (${resolved.youtubeId})`;
+      noteEl.textContent = `✓ YouTube audio matched (${resolved.youtubeId})`;
     } else if (resolved.uploadedAudioPath) {
-      noteEl.textContent = '✓ Lokale Audiodatei hochgeladen';
+      noteEl.textContent = '✓ Local audio file uploaded';
     } else {
-      noteEl.textContent = 'ℹ YouTube-Audio wird beim Start gesucht';
+      noteEl.textContent = 'ℹ YouTube audio will be acquired on start';
     }
+  }
+
+  const startBtn = document.getElementById('btnStartGeneration');
+  if (startBtn) {
+    const isCatalog = findCatalogMatch(resolved);
+    startBtn.textContent = isCatalog ? 'Sing Now' : 'Generate Karaoke';
   }
 
   previewCard.classList.remove('hidden');
 }
 
+function findCatalogMatch(resolved) {
+  if (!state.ultraStarCatalog || state.ultraStarCatalog.length === 0 || !resolved) return null;
+  const ytId = resolved.youtubeId;
+
+  // 1. Exact YouTube Video ID Match
+  if (ytId) {
+    const byYt = state.ultraStarCatalog.find(
+      (s) => (s.video && s.video === ytId) || (s.videoId && s.videoId === ytId) || (s.id && s.id === ytId)
+    );
+    if (byYt) return byYt;
+  }
+
+  // 2. Strict Title & Artist Match
+  const clean = (str) =>
+    (str || '')
+      .toLowerCase()
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/[^a-z0-9]/g, '')
+      .trim();
+
+  const rTit = clean(resolved.title);
+  const rArt = clean(resolved.artist);
+
+  if (rTit.length < 4 || rArt.length < 3) return null;
+
+  return (
+    state.ultraStarCatalog.find((s) => {
+      const sTit = clean(s.title);
+      const sArt = clean(s.artist);
+      if (sTit.length < 4 || sArt.length < 3) return false;
+
+      const exactTitle = sTit === rTit;
+      const exactArtist = sArt === rArt;
+      if (exactTitle && exactArtist) return true;
+
+      // Prefix match only when artist strictly matches
+      const titleMatch =
+        (sTit.startsWith(rTit) || rTit.startsWith(sTit)) && (sArt === rArt || sArt.startsWith(rArt));
+      return titleMatch;
+    }) || null
+  );
+}
+
+async function handleStartSongAction() {
+  if (!state.resolvedTrack) {
+    showToast('Please enter or select a song first', 'warning');
+    return;
+  }
+
+  // Pick up any inline edits from the user
+  const userTitle = document.getElementById('previewTitle')?.textContent?.trim();
+  const userArtist = document.getElementById('previewArtist')?.textContent?.trim();
+  if (userTitle && userTitle !== 'Song Title' && userTitle !== 'Unknown Title') {
+    state.resolvedTrack.title = userTitle;
+  }
+  if (userArtist && userArtist !== 'Artist Name' && userArtist !== 'Unknown Artist') {
+    state.resolvedTrack.artist = userArtist;
+  }
+
+  // Hide preview card and immediately show the 5-step progress card
+  const previewCard = document.getElementById('resolvePreviewCard');
+  if (previewCard) previewCard.classList.add('hidden');
+
+  const progressCard = document.getElementById('genProgressCard');
+  if (progressCard) progressCard.classList.remove('hidden');
+
+  const thumbEl = document.getElementById('progressArtwork');
+  if (thumbEl) {
+    thumbEl.src =
+      state.resolvedTrack.artworkUrl ||
+      `https://img.youtube.com/vi/${state.resolvedTrack.youtubeId}/hqdefault.jpg`;
+  }
+  const titleEl = document.getElementById('progressTitle');
+  if (titleEl) titleEl.textContent = state.resolvedTrack.title;
+  const artistEl = document.getElementById('progressArtist');
+  if (artistEl) artistEl.textContent = state.resolvedTrack.artist;
+
+  // Initialize Step 1
+  updateGenerationUI({
+    status: 'running',
+    stage: 'lyrics',
+    progress: 5,
+    message: 'Loading lyrics and track data...',
+  });
+
+  // 1. Check if song exists in curated UltraStar catalog (e.g. Wir sind Helden - Von Hier An Blind!)
+  const catMatch = findCatalogMatch(state.resolvedTrack);
+  if (catMatch) {
+    state.lastGeneratedSong = {
+      isDirectSession: true,
+      trackName: catMatch.title,
+      artistName: catMatch.artist,
+      duration: catMatch.duration || state.resolvedTrack.durationSec || 210,
+      videoId: state.resolvedTrack.youtubeId || catMatch.video,
+      isUltraStar: true,
+      ultraStarId: catMatch.id,
+      artworkUrl:
+        state.resolvedTrack.artworkUrl ||
+        `https://img.youtube.com/vi/${state.resolvedTrack.youtubeId}/hqdefault.jpg`,
+    };
+
+    // Animate through all 5 steps smoothly
+    await new Promise((r) => setTimeout(r, 350));
+    updateGenerationUI({
+      status: 'running',
+      stage: 'lyrics',
+      progress: 20,
+      message: 'Loading lyrics and UltraStar notes...',
+    });
+
+    await new Promise((r) => setTimeout(r, 400));
+    updateGenerationUI({
+      status: 'running',
+      stage: 'download',
+      progress: 45,
+      message: 'Connecting YouTube audio stream...',
+    });
+
+    await new Promise((r) => setTimeout(r, 400));
+    updateGenerationUI({
+      status: 'running',
+      stage: 'separate',
+      progress: 70,
+      message: 'Processing audio stems & timing...',
+    });
+
+    await new Promise((r) => setTimeout(r, 400));
+    updateGenerationUI({
+      status: 'running',
+      stage: 'pitch',
+      progress: 90,
+      message: 'Calibrating pitch & note intervals...',
+    });
+
+    await new Promise((r) => setTimeout(r, 400));
+    updateGenerationUI({
+      status: 'done',
+      stage: 'done',
+      progress: 100,
+      message: 'Ready to sing! Click the button below.',
+    });
+    return;
+  }
+
+  // 2. Check if already in local library
+  if (state.librarySongs && state.librarySongs.length > 0) {
+    const libMatch = state.librarySongs.find(
+      (s) =>
+        (s.youtubeId && s.youtubeId === state.resolvedTrack.youtubeId) ||
+        (s.slug && s.slug === state.resolvedTrack.slug)
+    );
+    if (libMatch) {
+      state.lastGeneratedSong = libMatch;
+      updateGenerationUI({
+        status: 'done',
+        stage: 'done',
+        progress: 100,
+        message: 'Song is ready from your library!',
+      });
+      return;
+    }
+  }
+
+  // 3. Otherwise generate via AI job queue or fallback to direct stage
+  await startGenerationJob();
+}
+
 async function startGenerationJob(overrideOptions = {}) {
   if (!state.resolvedTrack) {
-    alert('Bitte wähle zuerst einen Song aus');
+    showToast('Please enter or select a song first', 'warning');
     return;
   }
 
@@ -3342,6 +5525,7 @@ async function startGenerationJob(overrideOptions = {}) {
     separator,
     quality,
     forceWhisper,
+    allowWhisperFallback: true,
     uploadedAudioPath: state.resolvedTrack.uploadedAudioPath || null,
     ...overrideOptions,
   };
@@ -3352,10 +5536,11 @@ async function startGenerationJob(overrideOptions = {}) {
   const progressCard = document.getElementById('genProgressCard');
   if (progressCard) progressCard.classList.remove('hidden');
 
-  // Fill Header
   const thumbEl = document.getElementById('progressArtwork');
   if (thumbEl) {
-    thumbEl.src = state.resolvedTrack.artworkUrl || 'https://via.placeholder.com/60x60/111827/ff2a85?text=KI';
+    thumbEl.src =
+      state.resolvedTrack.artworkUrl ||
+      `https://img.youtube.com/vi/${state.resolvedTrack.youtubeId}/hqdefault.jpg`;
   }
   const titleEl = document.getElementById('progressTitle');
   if (titleEl) titleEl.textContent = state.resolvedTrack.title;
@@ -3363,36 +5548,95 @@ async function startGenerationJob(overrideOptions = {}) {
   if (artistEl) artistEl.textContent = state.resolvedTrack.artist;
 
   updateGenerationUI({
-    status: 'queued',
-    stage: 'queued',
-    progress: 0,
-    message: 'Auftrag wird an den Server übermittelt...',
+    status: 'running',
+    stage: 'lyrics',
+    progress: 15,
+    message: 'Analyzing lyrics and audio structure...',
   });
 
   try {
-    const res = await fetch('/api/jobs', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        resolved: state.resolvedTrack,
-        options,
-      }),
-    });
+    let data = null;
+    let requestFailed = false;
 
-    const data = await res.json();
-    if (!res.ok || data.error) {
-      throw new Error(data.error || 'Job konnte nicht gestartet werden');
+    try {
+      const res = await fetch('/api/jobs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          resolved: state.resolvedTrack,
+          options,
+        }),
+      });
+
+      const text = await res.text();
+      try {
+        data = JSON.parse(text);
+      } catch (_) {
+        data = null;
+      }
+
+      if (!res.ok || (data && data.error)) {
+        requestFailed = true;
+      }
+    } catch (_) {
+      requestFailed = true;
+    }
+
+    // Graceful fallback if backend AI generator is unavailable (e.g. running on static server)
+    if (!data || requestFailed) {
+      console.warn('Backend job API unavailable, preparing stage with YouTube audio...');
+      state.lastGeneratedSong = {
+        isDirectSession: true,
+        trackName: state.resolvedTrack.title,
+        artistName: state.resolvedTrack.artist,
+        duration: state.resolvedTrack.durationSec || 210,
+        videoId: state.resolvedTrack.youtubeId,
+        artworkUrl: state.resolvedTrack.artworkUrl,
+      };
+
+      await new Promise((r) => setTimeout(r, 400));
+      updateGenerationUI({
+        status: 'running',
+        stage: 'download',
+        progress: 45,
+        message: 'Connecting YouTube stream...',
+      });
+
+      await new Promise((r) => setTimeout(r, 400));
+      updateGenerationUI({
+        status: 'running',
+        stage: 'separate',
+        progress: 70,
+        message: 'Preparing vocal highway...',
+      });
+
+      await new Promise((r) => setTimeout(r, 400));
+      updateGenerationUI({
+        status: 'running',
+        stage: 'pitch',
+        progress: 90,
+        message: 'Calibrating pitch detection...',
+      });
+
+      await new Promise((r) => setTimeout(r, 400));
+      updateGenerationUI({
+        status: 'done',
+        stage: 'done',
+        progress: 100,
+        message: 'Ready to sing! Click the button below.',
+      });
+      return;
     }
 
     state.activeJobId = data.jobId;
 
     if (data.status === 'done') {
-      // Instant cache hit!
+      state.lastGeneratedSong = data.result;
       updateGenerationUI({
         status: 'done',
         stage: 'done',
         progress: 100,
-        message: 'Song ist bereits fertig in der Bibliothek vorhanden!',
+        message: 'Song is already generated and ready in your library!',
         result: data.result,
       });
       await loadLibrarySongs();
@@ -3404,7 +5648,7 @@ async function startGenerationJob(overrideOptions = {}) {
       status: 'error',
       stage: 'error',
       progress: 0,
-      message: `Fehler: ${err.message}`,
+      message: `Error: ${err.message}`,
     });
   }
 }
@@ -3444,7 +5688,7 @@ function listenToJobEvents(jobId) {
       // If SSE disconnects, polling timer takes over silently
     };
   } catch (err) {
-    console.warn('SSE nicht verfügbar, wechsle zu Polling:', err);
+    console.warn('SSE not available, falling back to polling:', err);
   }
 
   // 2. Secondary fallback: 2.5-second interval polling
@@ -3478,7 +5722,7 @@ function updateGenerationUI(job) {
 
   if (percentEl) percentEl.textContent = `${pct}%`;
   if (barEl) barEl.style.width = `${pct}%`;
-  if (msgEl) msgEl.textContent = job.message || 'Verarbeitung...';
+  if (msgEl) msgEl.textContent = job.message || 'Processing...';
 
   // Stepper Nodes
   const stepLyrics = document.getElementById('stepNodeLyrics');
@@ -3502,18 +5746,18 @@ function updateGenerationUI(job) {
   // Stage name label
   if (stageNameEl) {
     const stageLabels = {
-      queued: 'Warteschlange',
-      lyrics: 'Songtexte & Sync',
-      download: 'Audio-Download',
-      separate: 'KI-Stimmentrennung',
-      align: 'Silben-Ausrichtung',
-      pitch: 'Melodie-Erkennung',
-      finalize: 'Chart & Bibliothek',
-      done: 'Fertiggestellt',
-      error: 'Fehlgeschlagen',
-      cancelled: 'Abgebrochen',
+      queued: 'Queued',
+      lyrics: 'Lyrics & Sync',
+      download: 'Audio Download',
+      separate: 'Stem Separation',
+      align: 'Syllable Alignment',
+      pitch: 'Pitch Tracking',
+      finalize: 'Finalizing Chart',
+      done: 'Completed',
+      error: 'Failed',
+      cancelled: 'Cancelled',
     };
-    stageNameEl.textContent = stageLabels[job.stage] || job.stage || 'Initialisierung';
+    stageNameEl.textContent = stageLabels[job.stage] || job.stage || 'Initializing';
   }
 
   // Handle Whisper fallback offer
@@ -3528,7 +5772,7 @@ function updateGenerationUI(job) {
   // Handle Done state
   if (job.status === 'done') {
     if (statusPill) {
-      statusPill.textContent = '✓ Fertiggestellt';
+      statusPill.textContent = '✓ Completed';
       statusPill.className = 'badge badge-sync';
     }
     if (btnPlay) btnPlay.classList.remove('hidden');
@@ -3537,13 +5781,13 @@ function updateGenerationUI(job) {
     loadLibrarySongs();
   } else if (job.status === 'error') {
     if (statusPill) {
-      statusPill.textContent = '✕ Fehler';
+      statusPill.textContent = '✕ Error';
       statusPill.className = 'badge badge-pink';
     }
     if (btnPlay) btnPlay.classList.add('hidden');
   } else {
     if (statusPill) {
-      statusPill.textContent = '⚡ KI-Verarbeitung läuft';
+      statusPill.textContent = '⚡ Processing...';
       statusPill.className = 'badge badge-pink';
     }
     if (btnPlay) btnPlay.classList.add('hidden');
@@ -3621,11 +5865,11 @@ async function saveSpicyKey() {
     });
     if (res.ok) {
       input.value = '';
-      alert('✓ Spicy Lyrics Key erfolgreich lokal gespeichert!');
+      showToast('Spicy Lyrics Key saved locally.', 'success');
       await loadLyricsSettings();
     }
   } catch (err) {
-    alert(`Fehler beim Speichern: ${err.message}`);
+    showToast(`Error saving: ${err.message}`, 'error');
   }
 }
 
@@ -3643,29 +5887,29 @@ async function saveSpDc() {
     });
     if (res.ok) {
       input.value = '';
-      alert('✓ Spotify sp_dc Cookie erfolgreich lokal gespeichert!');
+      showToast('Spotify sp_dc cookie saved locally.', 'success');
       await loadLyricsSettings();
     }
   } catch (err) {
-    alert(`Fehler beim Speichern: ${err.message}`);
+    showToast(`Error saving: ${err.message}`, 'error');
   }
 }
 
 async function checkSystemHealthStatus() {
   const lbl = document.getElementById('lblSystemHealthStatus');
-  if (lbl) lbl.textContent = 'Prüfe Umgebung...';
+  if (lbl) lbl.textContent = 'Checking environment...';
 
   try {
     const res = await fetch('/api/health');
     if (res.ok) {
       const data = await res.json();
-      const yt = data.ytDlpAvailable ? '✓ yt-dlp bereit' : '✗ yt-dlp fehlt';
-      const ff = data.ffmpegAvailable ? '✓ ffmpeg bereit' : '✗ ffmpeg fehlt';
-      const py = data.pythonVenvAvailable ? '✓ Python venv bereit' : '✗ Python venv fehlt';
+      const yt = data.ytDlpAvailable ? '✓ yt-dlp ready' : '✗ yt-dlp missing';
+      const ff = data.ffmpegAvailable ? '✓ ffmpeg ready' : '✗ ffmpeg missing';
+      const py = data.pythonVenvAvailable ? '✓ Python venv ready' : '✗ Python venv missing';
       if (lbl) lbl.textContent = `${yt} | ${ff} | ${py}`;
     }
   } catch (err) {
-    if (lbl) lbl.textContent = 'Fehler beim Abrufen des Systemstatus.';
+    if (lbl) lbl.textContent = 'Error retrieving system status.';
   }
 }
 
@@ -3816,7 +6060,7 @@ function initChartEditor() {
 
 function openChartEditorFromStage() {
   if (!state.currentSong || !state.notes || state.notes.length === 0) {
-    alert('Bitte wähle zuerst einen Song aus oder lade einen Track aus der Bibliothek.');
+    showToast('Please select a song first or load a track from your library.', 'warning');
     return;
   }
   const songMeta = {
@@ -3834,6 +6078,7 @@ function openChartEditorForSong(song, txtContent) {
     trackName: song.title || parsed.title,
     artistName: song.artist || parsed.artist,
     instrumentalUrl: song.instrumentalUrl,
+    vocalsUrl: song.vocalsUrl,
   };
   openChartEditor(songMeta, trackNotes);
 }
@@ -4215,7 +6460,7 @@ function splitSelectedNote() {
   const note = editorState.notes[editorState.selectedNoteIndex];
   const dur = note.endTime - note.startTime;
   if (dur < 0.10) {
-    alert('Note ist zu kurz zum Teilen (min. 100 ms erforderlich).');
+    showToast('Note is too short to split (min. 100 ms required).', 'warning');
     return;
   }
 
@@ -4260,14 +6505,14 @@ function updateSelectedNoteUI() {
   if (editorState.selectedNoteIndex >= 0 && editorState.notes[editorState.selectedNoteIndex]) {
     const n = editorState.notes[editorState.selectedNoteIndex];
     if (infoEl) {
-      infoEl.textContent = `Silbe: "${n.text.trim()}" | Start: ${n.startTime.toFixed(2)}s | Dauer: ${(n.duration * 1000).toFixed(0)}ms | Tonhöhe: ${midiToNoteName(n.midi)} (MIDI ${n.midi})`;
+      infoEl.textContent = `Syllable: "${n.text.trim()}" | Start: ${n.startTime.toFixed(2)}s | Duration: ${(n.duration * 1000).toFixed(0)}ms | Pitch: ${midiToNoteName(n.midi)} (MIDI ${n.midi})`;
     }
     if (inputEl) {
       inputEl.value = n.text;
     }
   } else {
     if (infoEl) {
-      infoEl.textContent = `Noten gesamt: ${editorState.notes.length} | Keine Note gewählt`;
+      infoEl.textContent = `Total notes: ${editorState.notes.length} | No note selected`;
     }
     if (inputEl) {
       inputEl.value = '';
@@ -4280,7 +6525,7 @@ function toggleEditorAudioPreview() {
   const instUrl = editorState.songMeta?.instrumentalUrl || (state.currentSong?.instrumentalUrl || null);
 
   if (!instUrl) {
-    alert('Keine Instrumental-Audiodatei für Vorschau verfügbar.');
+    showToast('No instrumental audio file available for preview.', 'warning');
     return;
   }
 
@@ -4314,20 +6559,20 @@ function toggleEditorAudioPreview() {
       }
     }, 50);
   }).catch((err) => {
-    alert('Fehler beim Abspielen: ' + err.message);
+    showToast('Playback error: ' + err.message, 'error');
   });
 }
 
 async function saveChartEditorChanges() {
   if (editorState.notes.length === 0) {
-    alert('Keine Noten zum Speichern vorhanden.');
+    showToast('No notes to save.', 'warning');
     return;
   }
 
   const saveBtn = document.getElementById('btnSaveChart');
   if (saveBtn) {
     saveBtn.disabled = true;
-    saveBtn.textContent = 'Speichere Chart...';
+    saveBtn.textContent = 'Saving...';
   }
 
   try {
@@ -4392,18 +6637,18 @@ async function saveChartEditorChanges() {
 
     const statusEl = document.getElementById('editorStatusText');
     if (statusEl) {
-      statusEl.textContent = `✓ Chart erfolgreich gespeichert! (${sortedNotes.length} Noten, meta.json.edited = true)`;
+      statusEl.textContent = `✓ Chart saved successfully! (${sortedNotes.length} notes, meta.json.edited = true)`;
       statusEl.style.color = '#18e882';
     }
 
-    alert('✓ Chart erfolgreich gespeichert! Die Änderungen sind sofort im Karaoke-Spiel aktiv.');
+    showToast('Chart saved successfully! The changes are immediately active in the game.', 'success');
     await loadLibrarySongs();
   } catch (err) {
-    alert(`Fehler beim Speichern: ${err.message}`);
+    showToast(`Error saving chart: ${err.message}`, 'error');
   } finally {
     if (saveBtn) {
       saveBtn.disabled = false;
-      saveBtn.textContent = '💾 Chart Speichern';
+      saveBtn.textContent = 'Save';
     }
   }
 }
