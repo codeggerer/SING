@@ -144,7 +144,8 @@ def generate_ultrastar_chart(
         # Note Formatting, Overlap Resolution & Minimum Timing (PLAN.md Phase 4 Task 4)
         for note_idx, note in enumerate(active_notes):
             s_pitch = note["pitch"]
-            s_beat = sec_to_beat(note["start"])
+            note_start_sec = float(note.get("note_start", note["start"]))
+            s_beat = sec_to_beat(note_start_sec)
             e_beat = sec_to_beat(note["end"])
 
             # Resolve overlaps only: guarantee at least MIN_NOTE_GAP_BEATS (1 beat = 10 ms)

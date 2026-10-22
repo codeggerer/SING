@@ -64,6 +64,8 @@ from karaoke.align_mms import (
     align_plain_lyrics_mms,
     align_lyrics_doc_mms,
     align_whisper_words_mms,
+    find_vowel_nucleus_from_char_spans,
+    compute_vowel_nucleus_onset,
 )
 
 
@@ -276,10 +278,13 @@ def distribute_word_syllables(
 
     if num_sylls <= 1:
         text = f"{clean_w} " if not clean_w.endswith(" ") else clean_w
+        note_start = compute_vowel_nucleus_onset(clean_w, start, end, char_spans=char_spans)
         return [{
             "word": text,
             "start": round(start, 3),
+            "note_start": note_start,
             "end": round(end, 3),
+            "char_spans": char_spans,
             "is_syllable": True,
         }]
 
@@ -298,10 +303,13 @@ def distribute_word_syllables(
                 s_end = s_spans[-1][2]
                 is_last = (s_idx == num_sylls - 1)
                 text = f"{syl} " if is_last else f"{syl}-"
+                note_start = compute_vowel_nucleus_onset(syl, s_start, s_end, char_spans=s_spans)
                 result.append({
                     "word": text,
                     "start": round(max(start, s_start), 3),
+                    "note_start": round(max(start, note_start), 3),
                     "end": round(min(end + 0.1, max(s_start + 0.030, s_end)), 3),
+                    "char_spans": s_spans,
                     "is_syllable": True,
                 })
             # Ensure monotonicity
@@ -310,6 +318,10 @@ def distribute_word_syllables(
                     mid = (result[i-1]["start"] + result[i]["end"]) / 2.0
                     result[i-1]["end"] = round(mid, 3)
                     result[i]["start"] = round(mid, 3)
+                    if "note_start" in result[i-1]:
+                        result[i-1]["note_start"] = min(result[i-1]["note_start"], result[i-1]["end"] - 0.030)
+                    if "note_start" in result[i]:
+                        result[i]["note_start"] = max(result[i]["start"], result[i]["note_start"])
             return result
 
     # Case B: Acoustic-driven syllable segmentation (Phase 3)
@@ -329,6 +341,11 @@ def distribute_word_syllables(
                 detect_melisma=False,
             )
             if acoustic_sylls is not None and len(acoustic_sylls) == num_sylls:
+                for s in acoustic_sylls:
+                    if "note_start" not in s:
+                        s["note_start"] = compute_vowel_nucleus_onset(
+                            s.get("word", clean_w), s["start"], s["end"], char_spans=s.get("char_spans")
+                        )
                 return acoustic_sylls
         except Exception:
             pass
@@ -365,10 +382,13 @@ def distribute_word_syllables(
         s_end = curr_start + s_dur
         is_last = (s_idx == num_sylls - 1)
         text = f"{syl} " if is_last else f"{syl}-"
+        note_start = compute_vowel_nucleus_onset(syl, curr_start, s_end, char_spans=None)
         result.append({
             "word": text,
             "start": round(curr_start, 3),
+            "note_start": round(max(curr_start, note_start), 3),
             "end": round(s_end, 3),
+            "char_spans": None,
             "is_syllable": True,
         })
         curr_start = s_end
@@ -494,6 +514,8 @@ def snap_syllables_to_audio(
         item = dict(s)
         item["start"] = new_start
         item["end"] = new_end
+        if "note_start" in s:
+            item["note_start"] = max(new_start, min(float(s["note_start"]), new_end - 0.030))
         snapped.append(item)
 
     return snapped
@@ -568,6 +590,8 @@ def prune_note_ends(
         item = dict(s)
         item["start"] = round(start_sec, 3)
         item["end"] = round(end_sec, 3)
+        if "note_start" in s:
+            item["note_start"] = max(item["start"], min(float(s["note_start"]), item["end"] - 0.030))
         pruned.append(item)
 
     return pruned

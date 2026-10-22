@@ -590,8 +590,20 @@ def quantize_notes(
         is_already_syllable = bool(w.get("is_syllable", False))
         has_melisma_marker = "~" in raw_word
 
-        # Extract frames
-        sf_idx = max(0, min(total_frames - 1, int(w_start / frame_dur)))
+        note_start = float(w.get("note_start", 0.0))
+        if note_start < w_start or note_start > w_end - 0.030:
+            from karaoke.align_mms import compute_vowel_nucleus_onset
+            note_start = compute_vowel_nucleus_onset(
+                raw_word,
+                w_start,
+                w_end,
+                char_spans=w.get("char_spans"),
+                pitch_data=pitch_data,
+            )
+        note_start = max(w_start, min(note_start, w_end - 0.030))
+
+        # Extract frames aligned to vowel nucleus
+        sf_idx = max(0, min(total_frames - 1, int(note_start / frame_dur)))
         ef_idx = max(sf_idx + 1, min(total_frames, int(w_end / frame_dur)))
         m_slice = midi_float[sf_idx:ef_idx]
         c_slice = conf[sf_idx:ef_idx]
@@ -602,7 +614,7 @@ def quantize_notes(
             m_slice,
             c_slice,
             r_slice,
-            w_start,
+            note_start,
             w_end,
             frame_dur,
             min_split_dur=0.35 if has_melisma_marker else 0.55,
@@ -616,6 +628,7 @@ def quantize_notes(
 
             item1 = {
                 "start": w_start,
+                "note_start": note_start,
                 "end": t_split,
                 "text": f"{clean_word}-",
                 "midi": midi_float[sf_idx:split_frame],
@@ -627,6 +640,7 @@ def quantize_notes(
             }
             item2 = {
                 "start": t_split,
+                "note_start": t_split,
                 "end": w_end,
                 "text": "~ ",
                 "midi": midi_float[split_frame:ef_idx],
@@ -642,6 +656,7 @@ def quantize_notes(
         else:
             item = {
                 "start": w_start,
+                "note_start": note_start,
                 "end": w_end,
                 "text": raw_word,
                 "midi": m_slice,
@@ -680,6 +695,7 @@ def quantize_notes(
             p_float = fb_pitch + octave_shift
             raw_notes.append({
                 "start": s_item["start"],
+                "note_start": s_item.get("note_start", s_item["start"]),
                 "end": s_item["end"],
                 "pitch": chosen_pitch,
                 "pitch_float": p_float,

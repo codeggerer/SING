@@ -583,6 +583,115 @@ def segment_word_syllables_acoustically(
     return result
 
 
+VOWEL_CHARS = set("aeiouyäöüAEIOUYÄÖÜ")
+VOICED_CONSONANTS = set("mbndgvwlrjzMBNDGVWLRJZ")
+
+
+def find_vowel_nucleus_from_char_spans(
+    char_spans: Optional[List[Tuple[str, float, float]]],
+    fallback_start: float,
+    max_prevoicing_sec: float = 0.030,
+) -> float:
+    """
+    Identifies the boundary between initial onset consonants and the first vowel nucleus
+    from character-level MMS-FA CTC spans (Issue #1).
+
+    - If the syllable starts with unvoiced consonants (st-, pl-, ch-, f-, k-),
+      returns the exact onset of the first vowel character.
+    - If the syllable starts with voiced plosives/nasals/liquids (m-, n-, b-, d-, etc.),
+      retains a small pre-voicing buffer (up to 30ms) before the vowel.
+    - If the syllable starts directly with a vowel, returns the syllable start time.
+    - If no vowels are found, falls back to fallback_start.
+    """
+    if not char_spans:
+        return fallback_start
+
+    v_idx = -1
+    for idx, (ch, s, e) in enumerate(char_spans):
+        if ch.lower() in VOWEL_CHARS:
+            v_idx = idx
+            break
+
+    if v_idx == -1:
+        return fallback_start
+
+    if v_idx == 0:
+        return char_spans[0][1]
+
+    vowel_start = char_spans[v_idx][1]
+    prev_ch = char_spans[v_idx - 1][0].lower()
+    if prev_ch in VOICED_CONSONANTS:
+        c_start = char_spans[v_idx - 1][1]
+        buffered_start = max(c_start, vowel_start - max_prevoicing_sec)
+        onset = max(char_spans[0][1], buffered_start)
+    else:
+        onset = vowel_start
+
+    return round(float(onset), 3)
+
+
+def compute_vowel_nucleus_onset(
+    word: str,
+    start: float,
+    end: float,
+    char_spans: Optional[List[Tuple[str, float, float]]] = None,
+    pitch_data: Optional[Dict[str, Any]] = None,
+    max_prevoicing_sec: float = 0.030,
+) -> float:
+    """
+    Computes note onset aligned to vowel nucleus instead of initial unvoiced consonants (Issue #1).
+    1. If character spans are available, extracts vowel nucleus boundary via find_vowel_nucleus_from_char_spans.
+    2. Uses silence / unvoiced pruning via pitch_data (conf / voiced probability >= 0.45) to avoid starting
+       scored note rectangles in unvoiced regions.
+    Guarantees note_start >= start and note_start <= end - 0.030.
+    """
+    vowel_onset = start
+    if char_spans:
+        vowel_onset = find_vowel_nucleus_from_char_spans(
+            char_spans,
+            fallback_start=start,
+            max_prevoicing_sec=max_prevoicing_sec,
+        )
+
+    clean_text = re.sub(r'^[^\w]+|[^\w]+$', '', word).lower()
+    onset_match = re.match(r'^[^aeiouyäöü]+', clean_text)
+
+    # Silence / Unvoiced Pruning using pitch_data if available
+    if pitch_data:
+        pitches = pitch_data.get("midi") if "midi" in pitch_data else pitch_data.get("pitches")
+        conf = pitch_data.get("conf") if "conf" in pitch_data else pitch_data.get("confidence")
+        hop_sec = float(pitch_data.get("frame_dur_sec", 0.010))
+
+        if pitches is not None and len(pitches) > 0:
+            f_start = max(0, int(round(start / hop_sec)))
+            f_end = min(len(pitches), int(round(end / hop_sec)))
+
+            if f_end > f_start:
+                p_slice = pitches[f_start:f_end]
+                c_slice = conf[f_start:f_end] if conf is not None else np.ones_like(p_slice)
+                voiced_mask = (~np.isnan(p_slice)) & (p_slice > 0) & (c_slice >= 0.45)
+                voiced_indices = np.where(voiced_mask)[0]
+
+                if len(voiced_indices) > 0:
+                    first_v_idx = int(voiced_indices[0])
+                    first_voiced_sec = (f_start + first_v_idx) * hop_sec
+                    max_allowed = end - 0.030
+
+                    if first_voiced_sec <= max_allowed and first_voiced_sec > start:
+                        if onset_match:
+                            lead = onset_match.group(0)
+                            if lead[-1] in VOICED_CONSONANTS:
+                                acoustic_onset = max(start, first_voiced_sec - max_prevoicing_sec)
+                            else:
+                                acoustic_onset = first_voiced_sec
+                            vowel_onset = max(vowel_onset, acoustic_onset)
+                        elif first_voiced_sec - start <= 0.050:
+                            vowel_onset = max(vowel_onset, first_voiced_sec)
+
+    vowel_onset = max(start, min(vowel_onset, end - 0.030))
+    return round(float(vowel_onset), 3)
+
+
 def distribute_word_syllables(
     word: str,
     start: float,
@@ -608,10 +717,13 @@ def distribute_word_syllables(
 
     if num_sylls <= 1:
         text = f"{clean_w} " if not clean_w.endswith(" ") else clean_w
+        note_start = compute_vowel_nucleus_onset(clean_w, start, end, char_spans=char_spans)
         return [{
             "word": text,
             "start": round(start, 3),
+            "note_start": note_start,
             "end": round(end, 3),
+            "char_spans": char_spans,
             "is_syllable": True,
         }]
 
@@ -629,10 +741,13 @@ def distribute_word_syllables(
                 s_end = s_spans[-1][2]
                 is_last = (s_idx == num_sylls - 1)
                 text = f"{syl} " if is_last else f"{syl}-"
+                note_start = compute_vowel_nucleus_onset(syl, s_start, s_end, char_spans=s_spans)
                 result.append({
                     "word": text,
                     "start": round(max(start, s_start), 3),
+                    "note_start": round(max(start, note_start), 3),
                     "end": round(min(end + 0.1, max(s_start + 0.030, s_end)), 3),
+                    "char_spans": s_spans,
                     "is_syllable": True,
                 })
             for i in range(1, len(result)):
@@ -640,6 +755,10 @@ def distribute_word_syllables(
                     mid = (result[i-1]["start"] + result[i]["end"]) / 2.0
                     result[i-1]["end"] = round(mid, 3)
                     result[i]["start"] = round(mid, 3)
+                    if "note_start" in result[i-1]:
+                        result[i-1]["note_start"] = min(result[i-1]["note_start"], result[i-1]["end"] - 0.030)
+                    if "note_start" in result[i]:
+                        result[i]["note_start"] = max(result[i]["start"], result[i]["note_start"])
             return result
 
     # Case 2: Acoustic-driven syllable segmentation (Phase 3)
@@ -659,6 +778,11 @@ def distribute_word_syllables(
                 detect_melisma=False,
             )
             if acoustic_sylls is not None and len(acoustic_sylls) == num_sylls:
+                for s in acoustic_sylls:
+                    if "note_start" not in s:
+                        s["note_start"] = compute_vowel_nucleus_onset(
+                            s.get("word", clean_w), s["start"], s["end"], char_spans=s.get("char_spans")
+                        )
                 return acoustic_sylls
         except Exception:
             pass
@@ -691,10 +815,13 @@ def distribute_word_syllables(
         s_end = curr_start + s_dur
         is_last = (s_idx == num_sylls - 1)
         text = f"{syl} " if is_last else f"{syl}-"
+        note_start = compute_vowel_nucleus_onset(syl, curr_start, s_end, char_spans=None)
         result.append({
             "word": text,
             "start": round(curr_start, 3),
+            "note_start": round(max(curr_start, note_start), 3),
             "end": round(s_end, 3),
+            "char_spans": None,
             "is_syllable": True,
         })
         curr_start = s_end
@@ -808,6 +935,8 @@ def snap_syllables_to_audio(
         item = dict(s)
         item["start"] = new_start
         item["end"] = new_end
+        if "note_start" in s:
+            item["note_start"] = max(new_start, min(float(s["note_start"]), new_end - 0.030))
         snapped.append(item)
 
     return snapped
@@ -874,6 +1003,8 @@ def prune_note_ends(
         item = dict(s)
         item["start"] = round(start_sec, 3)
         item["end"] = round(end_sec, 3)
+        if "note_start" in s:
+            item["note_start"] = max(item["start"], min(float(s["note_start"]), item["end"] - 0.030))
         pruned.append(item)
 
     return pruned

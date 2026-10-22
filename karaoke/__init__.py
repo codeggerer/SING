@@ -61,6 +61,8 @@ from karaoke.align_mms import (
     align_plain_lyrics_mms,
     align_lyrics_doc_mms,
     align_whisper_words_mms,
+    find_vowel_nucleus_from_char_spans,
+    compute_vowel_nucleus_onset,
 )
 from karaoke.pitch_neural import (
     track_f0_fcpe,
@@ -169,6 +171,8 @@ __all__ = [
     "align_plain_lyrics_mms",
     "align_lyrics_doc_mms",
     "align_whisper_words_mms",
+    "find_vowel_nucleus_from_char_spans",
+    "compute_vowel_nucleus_onset",
     "track_f0_fcpe",
     "track_f0_rmvpe",
     "track_f0_neural",

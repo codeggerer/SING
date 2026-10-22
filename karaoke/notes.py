@@ -12,6 +12,10 @@ from karaoke.pitch import (
     soft_snap_to_scale,
     snap_pitch_to_scale,
 )
+from karaoke.align_mms import (
+    find_vowel_nucleus_from_char_spans,
+    compute_vowel_nucleus_onset,
+)
 from karaoke.config import (
     BEAT_DUR_SEC,
     PAUSE_BREAK_THRESHOLD_SEC,
@@ -108,10 +112,12 @@ def energy_guided_syllable_split(
     # Monosyllable protection: words with duration < 0.28s or count <= 1 are NEVER split
     if is_monosyllable(clean_w, lang=lang, duration=total_dur) or total_dur < MIN_WORD_DUR_FOR_SPLIT:
         disp = f"{clean_w} " if not (clean_w.endswith(" ") or clean_w.endswith("-")) else clean_w
+        note_s = compute_vowel_nucleus_onset(clean_w, start, end, pitch_data=pitch_data)
         return [{
             "word": disp,
             "text": disp,
             "start": round(start, 3),
+            "note_start": round(max(start, note_s), 3),
             "end": round(end, 3),
             "is_syllable": True,
         }]
@@ -121,10 +127,12 @@ def energy_guided_syllable_split(
     N = len(syllables)
     if N <= 1:
         disp = f"{clean_w} " if not (clean_w.endswith(" ") or clean_w.endswith("-")) else clean_w
+        note_s = compute_vowel_nucleus_onset(clean_w, start, end, pitch_data=pitch_data)
         return [{
             "word": disp,
             "text": disp,
             "start": round(start, 3),
+            "note_start": round(max(start, note_s), 3),
             "end": round(end, 3),
             "is_syllable": True,
         }]
@@ -257,10 +265,12 @@ def energy_guided_syllable_split(
         s_dur = max(0.030, s_end - cur_t)
         actual_end = round(cur_t + s_dur, 3)
         disp = f"{syl} " if is_last else f"{syl}-"
+        note_s = compute_vowel_nucleus_onset(syl, cur_t, actual_end, pitch_data=pitch_data)
         result.append({
             "word": disp,
             "text": disp,
             "start": round(cur_t, 3),
+            "note_start": round(max(cur_t, note_s), 3),
             "end": actual_end,
             "is_syllable": True,
         })
@@ -314,7 +324,9 @@ def build_word_notes(
                             "word": s["word"],
                             "text": s.get("text", s["word"]),
                             "start": s["start"],
+                            "note_start": s.get("note_start", s["start"]),
                             "end": s["end"],
+                            "char_spans": s.get("char_spans"),
                             "is_syllable": True,
                         }
                         if s_idx == len(syll_dicts) - 1:
@@ -372,10 +384,15 @@ def build_word_notes(
         has_tilde_marker = "~" in raw_word
 
         if is_already_syllable:
+            note_s = float(w.get("note_start", 0.0))
+            if note_s <= 0.0 or note_s < w_start:
+                note_s = compute_vowel_nucleus_onset(raw_word, w_start, w_end, char_spans=w.get("char_spans"), pitch_data=pitch_data)
+            note_s = max(w_start, min(note_s, w_end - 0.030))
+
             # Check for deliberate melisma split on long syllables (>= 700ms)
             melisma = detect_syllable_split(
                 pitch_data,
-                w_start,
+                note_s,
                 w_end,
                 basic_pitch_notes=basic_pitch_notes,
                 has_tilde=has_tilde_marker,
@@ -386,13 +403,13 @@ def build_word_notes(
                 prev_pitch_float = pf2
                 clean_text = raw_word.rstrip('~').rstrip('-').rstrip(' ')
                 raw_notes = [
-                    {"start": t0, "end": t1, "pitch": pi1, "pitch_float": pf1, "text": f"{clean_text}-"},
-                    {"start": t2, "end": t3, "pitch": pi2, "pitch_float": pf2, "text": "~ "},
+                    {"start": t0, "note_start": note_s, "end": t1, "pitch": pi1, "pitch_float": pf1, "text": f"{clean_text}-"},
+                    {"start": t2, "note_start": t2, "end": t3, "pitch": pi2, "pitch_float": pf2, "text": "~ "},
                 ]
             else:
-                s_float, s_pitch = get_syllable_pitch(pitch_data, w_start, w_end, fallback_pitch=prev_pitch_float, return_float=True)
+                s_float, s_pitch = get_syllable_pitch(pitch_data, note_s, w_end, fallback_pitch=prev_pitch_float, return_float=True)
                 prev_pitch_float = s_float
-                raw_notes = [{"start": w_start, "end": w_end, "pitch": s_pitch, "pitch_float": s_float, "text": raw_word}]
+                raw_notes = [{"start": w_start, "note_start": note_s, "end": w_end, "pitch": s_pitch, "pitch_float": s_float, "text": raw_word}]
 
             word_notes_list.append({"pause_beat": pause_beat, "notes": raw_notes, "num_sylls": 1})
             continue
@@ -412,9 +429,10 @@ def build_word_notes(
         raw_notes = []
 
         if num_sylls == 1:
+            note_s = float(syll_dicts[0].get("note_start", w_start))
             melisma = detect_syllable_split(
                 pitch_data,
-                w_start,
+                note_s,
                 w_end,
                 basic_pitch_notes=basic_pitch_notes,
                 has_tilde=has_tilde_marker,
@@ -424,19 +442,20 @@ def build_word_notes(
                 (t0, t1, pf1, pi1), (t2, t3, pf2, pi2) = melisma[0], melisma[1]
                 prev_pitch_float = pf2
                 clean_text = syll_dicts[0]['word'].strip().rstrip('-').rstrip('~')
-                raw_notes.append({"start": t0, "end": t1, "pitch": pi1, "pitch_float": pf1, "text": f"{clean_text}-"})
-                raw_notes.append({"start": t2, "end": t3, "pitch": pi2, "pitch_float": pf2, "text": "~ "})
+                raw_notes.append({"start": t0, "note_start": note_s, "end": t1, "pitch": pi1, "pitch_float": pf1, "text": f"{clean_text}-"})
+                raw_notes.append({"start": t2, "note_start": t2, "end": t3, "pitch": pi2, "pitch_float": pf2, "text": "~ "})
             else:
-                p_float, p_int = get_syllable_pitch(pitch_data, w_start, w_end, fallback_pitch=prev_pitch_float, return_float=True)
+                p_float, p_int = get_syllable_pitch(pitch_data, note_s, w_end, fallback_pitch=prev_pitch_float, return_float=True)
                 prev_pitch_float = p_float
-                raw_notes.append({"start": w_start, "end": w_end, "pitch": p_int, "pitch_float": p_float, "text": syll_dicts[0]["word"]})
+                raw_notes.append({"start": w_start, "note_start": note_s, "end": w_end, "pitch": p_int, "pitch_float": p_float, "text": syll_dicts[0]["word"]})
         else:
             for s_idx, s_info in enumerate(syll_dicts):
                 s_s = s_info["start"]
                 s_e = s_info["end"]
-                s_float, s_pitch = get_syllable_pitch(pitch_data, s_s, s_e, fallback_pitch=prev_pitch_float, return_float=True)
+                s_note_s = float(s_info.get("note_start", s_s))
+                s_float, s_pitch = get_syllable_pitch(pitch_data, s_note_s, s_e, fallback_pitch=prev_pitch_float, return_float=True)
                 prev_pitch_float = s_float
-                raw_notes.append({"start": s_s, "end": s_e, "pitch": s_pitch, "pitch_float": s_float, "text": s_info["word"]})
+                raw_notes.append({"start": s_s, "note_start": s_note_s, "end": s_e, "pitch": s_pitch, "pitch_float": s_float, "text": s_info["word"]})
 
         word_notes_list.append({"pause_beat": pause_beat, "notes": raw_notes, "num_sylls": num_sylls})
 
