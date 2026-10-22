@@ -6,6 +6,13 @@ A full-stack, browser-based **SingStar / Let's Sing-style karaoke game** featuri
 
 ## 🌟 Key Highlights
 
+- **🏛️ 4-Tier Karaoke Consistency Architecture**:
+  - **Tier 1 (99 / 100)**: USDB Community Verified Ground-Truth (28,000+ charts) with FFT cross-correlation audio snapping.
+  - **Tier 2 (94 / 100)**: Studio Syllable-Sync via Apple Music TTML, Spotify Color-Lyrics, and SpicyLyrics with sub-cent FCPE neural pitch.
+  - **Tier 3 (88 / 100)**: Multi-source Web Lyrics Harvester (YouTube descriptions, Genius, LRCLIB, DuckDuckGo snippets) + Meta MMS-FA VAD-island forced alignment (0% solo drift guarantee).
+  - **Tier 4 (76 / 100)**: Zero-Lyrics Raw AI fallback (Whisper `large-v3` + Silero VAD) with one-click user upgrade path.
+  - *Full details in [docs/FOUR_TIER_ARCHITECTURE.md](./docs/FOUR_TIER_ARCHITECTURE.md).*
+
 - **🎮 60 FPS Web Karaoke Game**:
   - Live pitch highway rendering with note capsules, vibrato tracking, combo multipliers, particle effects, and scoring.
   - **Render-Time Spacing**: Canvas highway renders clean visual spacing between adjacent notes without altering the underlying millisecond chart timestamps.
@@ -180,4 +187,10 @@ graph LR
     end
 ```
 
-For an in-depth breakdown of mathematical formulas, DSP implementations, and component interactions, refer to [`AGENTS.md`](./AGENTS.md).
+## 📚 Documentation & Technical Specifications
+
+For in-depth architectural breakdowns, benchmarks, and API guides:
+- 🏛️ **[4-Tier Consistency Architecture](./docs/FOUR_TIER_ARCHITECTURE.md)**: Tier 1–4 quality scores, fallback mechanics, and audio clock sync.
+- 🌾 **[Plain-Text Lyrics Harvester & Meta MMS-FA](./docs/LYRICS_HARVESTER_AND_FORCED_ALIGNMENT.md)**: YouTube description cleaner, Genius container extractor, VAD-island chunking, and slang normalization.
+- 🔬 **[Benchmark Evaluation & Quality Metrics](./docs/BENCHMARKS_AND_METRICS.md)**: Frame-level pitch accuracy (FLPA), Note accuracy (NLA), syllable onset MAE, and error analysis.
+- 🤖 **[Developer & Agent Guide (`AGENTS.md`)](./AGENTS.md)**: Architectural invariants, zero-dependency server rules, UltraStar beat math, McLeod Pitch Method (MPM) DSP, and copyright rules.
