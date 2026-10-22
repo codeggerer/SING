@@ -55,6 +55,8 @@ def generate_ultrastar_chart(
     key_info: Optional[Dict[str, Any]] = None,
     basic_pitch_notes: Optional[List[Dict[str, Any]]] = None,
     return_word_notes: bool = False,
+    vocals_path: Optional[Path | str] = None,
+    speech_timestamps: Optional[List[Dict[str, float]]] = None,
 ) -> Path | Tuple[Path, List[Dict[str, Any]]]:
     """
     Builds and writes a complete UltraStar TXT score chart file.
@@ -64,6 +66,18 @@ def generate_ultrastar_chart(
     print("=" * 65)
 
     output_txt_path = Path(output_txt_path).resolve()
+
+    # Apply Silero VAD acoustic breath breaks & hallucination filtering (Breakthrough 2)
+    if speech_timestamps or vocals_path:
+        try:
+            from karaoke.vad import apply_acoustic_breath_breaks, filter_hallucinations_vad, detect_vocal_intervals
+            if speech_timestamps is None and vocals_path:
+                speech_timestamps = detect_vocal_intervals(vocals_path)
+            if speech_timestamps:
+                words = filter_hallucinations_vad(words, speech_timestamps)
+                words = apply_acoustic_breath_breaks(words, speech_timestamps=speech_timestamps)
+        except Exception as e:
+            print(f"⚠️ Silero VAD breath break application failed ({e}), continuing with existing words.")
 
     ultrastar_lines = []
     ultrastar_lines.append(f"#TITLE:{title}")
@@ -79,8 +93,23 @@ def generate_ultrastar_chart(
     scale_pcs = key_info["scale_pcs"] if (key_info and "scale_pcs" in key_info) else set()
     key_confidence = float(key_info.get("confidence", 1.0)) if key_info else 1.0
 
-    # Pass 1: Raw notes extraction for all words
-    word_notes_list = build_word_notes(words, pitch_data, lang=lang, basic_pitch_notes=basic_pitch_notes)
+    vocal_audio = pitch_data.get("audio") if pitch_data else None
+    if vocal_audio is None and vocals_path and Path(vocals_path).exists():
+        try:
+            import librosa
+            vocal_audio, _ = librosa.load(str(vocals_path), sr=16000, mono=True)
+        except Exception:
+            pass
+
+    # Pass 1: Raw notes extraction for all words (Viterbi HMM Quantizer + Energy-Guided Syllables)
+    word_notes_list = build_word_notes(
+        words,
+        pitch_data,
+        lang=lang,
+        basic_pitch_notes=basic_pitch_notes,
+        key_info=key_info,
+        vocal_audio=vocal_audio,
+    )
 
     # Pass 2: Global Tessitura Analysis & Subharmonic Octave Recovery
     apply_global_octave_tessitura(word_notes_list)

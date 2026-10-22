@@ -19,6 +19,7 @@ from karaoke.config import (
     SONG_MEDIAN_MIN_MIDI,
     SONG_MEDIAN_MAX_MIDI,
     KEY_MIN_CONFIDENCE_FOR_SNAP,
+    MIN_WORD_DUR_FOR_SPLIT,
 )
 
 
@@ -27,21 +28,312 @@ def sec_to_beat(sec: float) -> int:
     return int(round(sec / BEAT_DUR_SEC))
 
 
+def is_monosyllable(word: str, lang: str = "de", duration: float = 0.5) -> bool:
+    """
+    Checks if a word is monosyllabic (1 syllable) in English or German.
+    Enforces monosyllable protection (AGENTS.md rule 4):
+    Words with duration < 0.28s, in MONOSYLLABLE_WORDS, or with phonetic count <= 1
+    are monosyllabic and must never be split.
+    """
+    if duration < 0.28:
+        return True
+    from karaoke.lyrics_io import MONOSYLLABLE_WORDS, count_phonetic_syllables
+    import re
+    clean = re.sub(r'^[^\w]+|[^\w]+$', '', word).lower()
+    if not clean or len(clean) <= 3:
+        return True
+    if clean in MONOSYLLABLE_WORDS:
+        return True
+    return count_phonetic_syllables(clean, lang=lang) <= 1
+
+
+def syllabify_word(
+    word: str,
+    lang: str = "de",
+    word_duration: float = 0.5,
+) -> List[Dict[str, Any]]:
+    """
+    Splits a word into phonetic syllables with display and trailing hyphen/space formatting.
+    Returns list of dicts:
+    [
+        {"display": "Fens-", "text": "Fens-", "word": "Fens-", "raw": "Fens", "is_last": False},
+        {"display": "ter ", "text": "ter ", "word": "ter ", "raw": "ter", "is_last": True}
+    ]
+    """
+    from karaoke.lyrics_io import split_syllables
+    clean_w = word.strip()
+    parts = split_syllables(clean_w, lang=lang, word_duration=word_duration)
+    n = len(parts)
+    if n <= 1:
+        text = f"{clean_w} " if not (clean_w.endswith(" ") or clean_w.endswith("-")) else clean_w
+        return [{"display": text, "text": text, "word": text, "raw": clean_w, "is_last": True}]
+
+    res = []
+    for i, p in enumerate(parts):
+        is_last = (i == n - 1)
+        disp = f"{p} " if is_last else f"{p}-"
+        res.append({
+            "display": disp,
+            "text": disp,
+            "word": disp,
+            "raw": p,
+            "is_last": is_last,
+        })
+    return res
+
+
+def energy_guided_syllable_split(
+    word: str,
+    start: float,
+    end: float,
+    vocal_audio: Optional[np.ndarray] = None,
+    sr: int = 16000,
+    lang: str = "de",
+    pitch_data: Optional[Dict[str, Any]] = None,
+    search_window_sec: float = 0.120,
+    is_last_in_phrase: bool = False,
+    has_pause_after: bool = False,
+) -> List[Dict[str, Any]]:
+    """
+    Phase 2.1: Energy-Guided Sub-Word Syllabification.
+    When dividing a multi-syllable word across N phonetic syllables, inspects the RMS
+    energy envelope E(t) = sqrt( (1/W) * sum_{k=0}^{W-1} x^2(t+k) ) and spectral flux.
+    Vowels have high energy; plosives and unvoiced consonants appear as brief energy dips.
+    Snaps syllable boundary markers to local minima of E(t) within a ±120ms search window
+    around the phonetic estimate.
+    """
+    clean_w = word.strip()
+    total_dur = max(0.030, end - start)
+
+    # Monosyllable protection: words with duration < 0.28s or count <= 1 are NEVER split
+    if is_monosyllable(clean_w, lang=lang, duration=total_dur) or total_dur < MIN_WORD_DUR_FOR_SPLIT:
+        disp = f"{clean_w} " if not (clean_w.endswith(" ") or clean_w.endswith("-")) else clean_w
+        return [{
+            "word": disp,
+            "text": disp,
+            "start": round(start, 3),
+            "end": round(end, 3),
+            "is_syllable": True,
+        }]
+
+    from karaoke.lyrics_io import split_syllables
+    syllables = split_syllables(clean_w, lang=lang, word_duration=total_dur)
+    N = len(syllables)
+    if N <= 1:
+        disp = f"{clean_w} " if not (clean_w.endswith(" ") or clean_w.endswith("-")) else clean_w
+        return [{
+            "word": disp,
+            "text": disp,
+            "start": round(start, 3),
+            "end": round(end, 3),
+            "is_syllable": True,
+        }]
+
+    # Compute phonetic estimates based on vowel nucleus and onset consonant distribution
+    import re
+    vowels_re = re.compile(r'[aeiouyäöüAEIOUYÄÖÜ]')
+    weights = []
+    for s_idx, syl in enumerate(syllables):
+        s_clean = syl.lower()
+        has_vowel = bool(vowels_re.search(s_clean))
+        base_w = 1.0 if has_vowel else 0.5
+        onset_m = re.match(r'^[^aeiouyäöü]+', s_clean)
+        onset_c = len(onset_m.group(0)) if onset_m else 0
+        w = base_w + 0.15 * onset_c
+        if s_idx == N - 1:
+            w *= 1.20
+        if (s_idx == N - 1) and (is_last_in_phrase or has_pause_after):
+            w *= 1.20
+        weights.append(w)
+
+    tot_w = sum(weights) or 1.0
+    norm_w = [w / tot_w for w in weights]
+
+    phonetic_splits = []
+    accum = start
+    for i in range(N - 1):
+        accum += total_dur * norm_w[i]
+        phonetic_splits.append(accum)
+
+    # Audio energy envelope extraction
+    if vocal_audio is None and pitch_data:
+        vocal_audio = pitch_data.get("audio")
+        if "sr" in pitch_data:
+            sr = int(pitch_data["sr"])
+
+    rms = None
+    flux = None
+    chunk_t0 = 0.0
+
+    if vocal_audio is not None and len(vocal_audio) > 0:
+        is_full_track = (len(vocal_audio) > int((total_dur + 0.5) * sr) and start >= 0)
+        hop_length = int(round(sr * 0.010))  # 10ms frame hop
+        frame_length = 2 * hop_length        # 20ms frame window W
+
+        if is_full_track:
+            margin = 0.6
+            w_s_samp = max(0, int(round((start - margin) * sr)))
+            w_e_samp = min(len(vocal_audio), int(round((end + margin) * sr)))
+            chunk = vocal_audio[w_s_samp:w_e_samp]
+            chunk_t0 = w_s_samp / float(sr)
+        else:
+            chunk = vocal_audio
+            chunk_t0 = start
+
+        if len(chunk) >= frame_length:
+            try:
+                import librosa
+                rms = librosa.feature.rms(y=chunk, frame_length=frame_length, hop_length=hop_length)[0]
+                try:
+                    flux = librosa.onset.onset_strength(y=chunk, sr=sr, hop_length=hop_length)
+                except Exception:
+                    flux = np.zeros_like(rms)
+            except Exception:
+                pad = frame_length - (len(chunk) % hop_length) if (len(chunk) % hop_length) != 0 else 0
+                padded = np.pad(chunk, (0, pad))
+                num_frames = (len(padded) - frame_length) // hop_length + 1
+                strides = (padded.strides[0] * hop_length, padded.strides[0])
+                frames = np.lib.stride_tricks.as_strided(
+                    padded, shape=(num_frames, frame_length), strides=strides
+                )
+                rms = np.sqrt(np.mean(frames**2, axis=1) + 1e-12).astype(np.float32)
+                flux = np.zeros_like(rms)
+    elif pitch_data and "rms" in pitch_data:
+        rms = pitch_data["rms"]
+        chunk_t0 = 0.0
+        flux = np.zeros_like(rms)
+
+    snapped_splits = []
+    prev_boundary = start
+    for k in range(N - 1):
+        t_phon = phonetic_splits[k]
+        min_bound = prev_boundary + 0.030
+        max_bound = end - 0.030 * (N - 1 - k)
+        if min_bound >= max_bound:
+            snapped_splits.append(min_bound)
+            prev_boundary = min_bound
+            continue
+
+        if rms is not None and len(rms) > 0:
+            # Search window: ±search_window_sec (default ±120ms) around phonetic estimate
+            w_s_time = max(min_bound, t_phon - search_window_sec)
+            w_e_time = min(max_bound, t_phon + search_window_sec)
+            if w_e_time > w_s_time:
+                f_start = max(0, int(round((w_s_time - chunk_t0) / 0.010)))
+                f_end = min(len(rms) - 1, int(round((w_e_time - chunk_t0) / 0.010)))
+                if f_end > f_start:
+                    rms_win = rms[f_start:f_end + 1]
+                    max_rms_win = float(np.max(rms_win))
+                    min_rms_win = float(np.min(rms_win))
+                    # Only snap if there is a real acoustic energy dip in the window (min 4% drop)
+                    if max_rms_win > 1e-4 and (max_rms_win - min_rms_win) >= 0.04 * max_rms_win:
+                        cost = rms_win
+
+                        # Center of minimum valley / plateau of E(t)
+                        min_c = float(np.min(cost))
+                        span_c = float(np.max(cost)) - min_c
+                        if span_c > 1e-6:
+                            valley_mask = np.where(cost <= min_c + 0.10 * span_c)[0]
+                            best_f_rel = int(round((valley_mask[0] + valley_mask[-1]) / 2.0))
+                        else:
+                            best_f_rel = int(np.argmin(cost))
+
+                        best_f = f_start + best_f_rel
+                        t_snapped = chunk_t0 + best_f * 0.010
+                        t_snapped = max(min_bound, min(max_bound, t_snapped))
+                        snapped_splits.append(t_snapped)
+                        prev_boundary = t_snapped
+                        continue
+
+        t_snapped = max(min_bound, min(max_bound, t_phon))
+        snapped_splits.append(t_snapped)
+        prev_boundary = t_snapped
+
+    result = []
+    cur_t = start
+    for s_idx, syl in enumerate(syllables):
+        is_last = (s_idx == N - 1)
+        s_end = end if is_last else snapped_splits[s_idx]
+        s_dur = max(0.030, s_end - cur_t)
+        actual_end = round(cur_t + s_dur, 3)
+        disp = f"{syl} " if is_last else f"{syl}-"
+        result.append({
+            "word": disp,
+            "text": disp,
+            "start": round(cur_t, 3),
+            "end": actual_end,
+            "is_syllable": True,
+        })
+        cur_t = actual_end
+
+    return result
+
+
 def build_word_notes(
     words: List[Dict[str, Any]],
     pitch_data: Dict[str, Any],
     lang: str = "de",
     basic_pitch_notes: Optional[List[Dict[str, Any]]] = None,
+    key_info: Optional[Dict[str, Any]] = None,
+    use_viterbi: bool = True,
+    vocal_audio: Optional[np.ndarray] = None,
 ) -> List[Dict[str, Any]]:
     """
-    Pass 1: Extracts raw notes and pause beats for each word/syllable.
-    Respects:
-    - Provider syllables / aligned syllables
-    - Phrase line breaks from providers or silence >= 0.6s / 8 words
-    - Minimum duration 30ms
-    - Change-point step detector for melisma (Fix for P2: dur >= 500ms, plateaus >= 150ms, diff >= 2st)
-    - Unvoiced syllable pitch inheritance from neighbor in same phrase
+    Extracts structured notes and pause beats for each word/syllable.
+    Uses Scale-Constrained Viterbi HMM Quantization (Phase 5) by default.
     """
+    if vocal_audio is None and pitch_data:
+        vocal_audio = pitch_data.get("audio")
+    sr = int(pitch_data.get("sr", 16000)) if pitch_data else 16000
+
+    if use_viterbi and pitch_data and ("midi" in pitch_data or "pitches" in pitch_data):
+        from karaoke.quantizer import quantize_notes
+        expanded_words = []
+        for w in words:
+            if w.get("is_syllable", False):
+                expanded_words.append(w)
+            else:
+                raw_word = str(w.get("word", ""))
+                w_start = float(w["start"])
+                w_end = max(float(w["end"]), w_start + 0.030)
+                syll_dicts = energy_guided_syllable_split(
+                    raw_word,
+                    w_start,
+                    w_end,
+                    vocal_audio=vocal_audio,
+                    sr=sr,
+                    lang=lang,
+                    pitch_data=pitch_data,
+                    is_last_in_phrase=bool(w.get("line_break_after")),
+                )
+                if len(syll_dicts) <= 1:
+                    expanded_words.append(w)
+                else:
+                    for s_idx, s in enumerate(syll_dicts):
+                        s_dict = {
+                            "word": s["word"],
+                            "text": s.get("text", s["word"]),
+                            "start": s["start"],
+                            "end": s["end"],
+                            "is_syllable": True,
+                        }
+                        if s_idx == len(syll_dicts) - 1:
+                            if w.get("line_break_after"):
+                                s_dict["line_break_after"] = True
+                            if w.get("pause_beat") is not None:
+                                s_dict["pause_beat"] = w["pause_beat"]
+                        expanded_words.append(s_dict)
+
+        try:
+            return quantize_notes(
+                expanded_words,
+                pitch_data,
+                key_info=key_info,
+                lang=lang,
+                basic_pitch_notes=basic_pitch_notes,
+            )
+        except Exception as e:
+            print(f"⚠️ Viterbi-Quantisierung fehlgeschlagen ({e}), weiche auf Pass-1 aus...")
     word_notes_list = []
     prev_pitch_float = 60.0
     words_in_current_phrase = 0
@@ -61,17 +353,26 @@ def build_word_notes(
             has_line_break_marker = bool(words[i-1].get("line_break_after", False))
 
             if has_line_break_marker or pause_sec >= PAUSE_BREAK_THRESHOLD_SEC or words_in_current_phrase >= LINE_MAX_WORDS:
-                pause_sec_mid = prev_end + min(0.15, max(0.02, pause_sec / 2.0)) if pause_sec > 0.04 else prev_end + 0.01
-                pause_beat = sec_to_beat(pause_sec_mid)
+                if words[i-1].get("pause_beat") is not None:
+                    raw_pb = int(words[i-1]["pause_beat"])
+                    prev_b = sec_to_beat(prev_end)
+                    curr_b = sec_to_beat(w_start)
+                    if curr_b > prev_b + 1:
+                        pause_beat = max(prev_b + 1, min(curr_b - 1, raw_pb))
+                    else:
+                        pause_beat = prev_b + 1
+                else:
+                    pause_sec_mid = prev_end + min(0.15, max(0.02, pause_sec / 2.0)) if pause_sec > 0.04 else prev_end + 0.01
+                    pause_beat = sec_to_beat(pause_sec_mid)
                 words_in_current_phrase = 0
 
         words_in_current_phrase += 1
 
         is_already_syllable = w.get("is_syllable", False)
-        has_tilde_marker = "~" in raw_word or raw_word.endswith("-")
+        has_tilde_marker = "~" in raw_word
 
         if is_already_syllable:
-            # Check for deliberate melisma split on long syllables (>= 500ms)
+            # Check for deliberate melisma split on long syllables (>= 700ms)
             melisma = detect_syllable_split(
                 pitch_data,
                 w_start,
@@ -96,13 +397,15 @@ def build_word_notes(
             word_notes_list.append({"pause_beat": pause_beat, "notes": raw_notes, "num_sylls": 1})
             continue
 
-        # Derived syllables via vowel nucleus distribution
-        from karaoke.align import distribute_word_syllables
-        syll_dicts = distribute_word_syllables(
+        # Derived syllables via energy-guided sub-word syllabification (Phase 2.1)
+        syll_dicts = energy_guided_syllable_split(
             raw_word,
             w_start,
             w_end,
+            vocal_audio=vocal_audio,
+            sr=sr,
             lang=lang,
+            pitch_data=pitch_data,
             is_last_in_phrase=(words_in_current_phrase >= LINE_MAX_WORDS),
         )
         num_sylls = len(syll_dicts)

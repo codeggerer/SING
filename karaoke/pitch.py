@@ -27,7 +27,7 @@ from karaoke.config import (
     VOCAL_FMIN_MALE, VOCAL_FMIN_FEMALE, VOCAL_FMAX,
     VOICED_PROB_THRESHOLD, RMS_FLOOR_DBFS, F0_MEDIAN_FILTER_SIZE,
     MIN_VOICED_RUN_FRAMES, OCTAVE_JUMP_TOLERANCE_ST, OCTAVE_NEIGHBOR_WINDOW_FRAMES,
-    TUNING_MAX_CORRECTION_CENTS, VIBRATO_LPF_CUTOFF_HZ,
+    TUNING_MAX_CORRECTION_CENTS, TUNING_MIN_CONFIDENCE, VIBRATO_LPF_CUTOFF_HZ,
     SPLIT_MIN_SYLLABLE_DUR_SEC, SPLIT_MIN_PLATEAU_DUR_SEC, SPLIT_MIN_SEMITONE_DIFF,
     SPLIT_MAX_PLATEAU_STD_ST, SPLIT_TILDE_MIN_SEMITONE_DIFF,
     KEY_MIN_CONFIDENCE_FOR_SNAP, SCALE_SNAP_MAX_DEV_ST,
@@ -55,32 +55,107 @@ def compute_audio_rms(y: np.ndarray, sr: int, hop_length: int) -> np.ndarray:
     return rms
 
 
-def _analyze_key_chroma(audio_data: np.ndarray, sr: int) -> Tuple[int, str, float]:
-    """Helper to detect key from audio array using Krumhansl-Schmuckler."""
-    if librosa is None:
-        return 0, "major", 0.0
+def detect_key_from_pitch_histogram(
+    pitch_histogram: np.ndarray | List[float],
+) -> Dict[str, Any]:
+    """
+    Phase 5.1: Krumhansl-Schmuckler Key-Finding Algorithm on detected pitch histogram.
+    Takes a 12-dimensional pitch-class distribution H (C, C#, D, Eb, E, F, F#, G, Ab, A, Bb, B)
+    and determines the optimal tonic root and mode (e.g. 'Ab Major').
+    """
+    h = np.asarray(pitch_histogram, dtype=float)
+    if len(h) != 12:
+        raise ValueError(f"Pitch histogram must have 12 chromatic bins, got {len(h)}")
 
-    chroma = librosa.feature.chroma_cqt(y=audio_data, sr=sr).mean(axis=1)
+    total = np.sum(h)
+    if total > 0:
+        h = h / total
+    else:
+        h = np.ones(12) / 12.0
+
     best_corr = -1.0
     best_root = 0
     best_mode = "major"
 
     for root in range(12):
         maj_prof = np.roll(MAJOR_PROFILE, root)
-        corr_maj = np.corrcoef(chroma, maj_prof)[0, 1]
+        corr_maj = np.corrcoef(h, maj_prof)[0, 1]
         if corr_maj > best_corr:
             best_corr = float(corr_maj)
             best_root = root
             best_mode = "major"
 
         min_prof = np.roll(MINOR_PROFILE, root)
-        corr_min = np.corrcoef(chroma, min_prof)[0, 1]
+        corr_min = np.corrcoef(h, min_prof)[0, 1]
         if corr_min > best_corr:
             best_corr = float(corr_min)
             best_root = root
             best_mode = "minor"
 
-    return best_root, best_mode, best_corr
+    confidence = max(0.0, best_corr)
+    intervals = MAJOR_INTERVALS if best_mode == "major" else MINOR_INTERVALS
+    scale_pcs = {(best_root + iv) % 12 for iv in intervals}
+    key_name = f"{NOTE_NAMES[best_root]} {best_mode.capitalize()}"
+
+    return {
+        "key": key_name,
+        "root": best_root,
+        "mode": best_mode,
+        "confidence": confidence,
+        "scale_pcs": scale_pcs,
+    }
+
+
+def detect_key_from_pitches(
+    pitches: np.ndarray | List[float],
+    weights: Optional[np.ndarray | List[float]] = None,
+) -> Dict[str, Any]:
+    """
+    Phase 5.1: Krumhansl-Schmuckler Key-Finding Algorithm from detected continuous pitches.
+    Constructs an energy/count-weighted 12-dimensional pitch class histogram and determines
+    tonic and mode (e.g. 'Ab Major').
+    """
+    p_arr = np.asarray(pitches, dtype=float)
+    w_arr = np.asarray(weights, dtype=float) if weights is not None else np.ones_like(p_arr)
+
+    # Valid mask: positive, finite, non-NaN
+    valid = np.isfinite(p_arr) & (p_arr > 0)
+    if not np.any(valid):
+        return {
+            "key": "C Major",
+            "root": 0,
+            "mode": "major",
+            "confidence": 0.0,
+            "scale_pcs": set(MAJOR_INTERVALS),
+        }
+
+    valid_p = p_arr[valid]
+    valid_w = w_arr[valid]
+
+    # Convert Hz to MIDI if needed (> 15 Hz)
+    is_hz = np.any(valid_p > 130)  # Standard MIDI range is 0-127
+    if is_hz:
+        valid_midis = 69.0 + 12.0 * np.log2(np.maximum(10.0, valid_p) / 440.0)
+    else:
+        valid_midis = valid_p
+
+    h = np.zeros(12, dtype=float)
+    for m, w in zip(valid_midis, valid_w):
+        if np.isfinite(m) and m > 0:
+            pc = int(round(m)) % 12
+            h[pc] += max(0.0, float(w))
+
+    return detect_key_from_pitch_histogram(h)
+
+
+def _analyze_key_chroma(audio_data: np.ndarray, sr: int) -> Tuple[int, str, float]:
+    """Helper to detect key from audio array using Krumhansl-Schmuckler."""
+    if librosa is None:
+        return 0, "major", 0.0
+
+    chroma = librosa.feature.chroma_cqt(y=audio_data, sr=sr).mean(axis=1)
+    res = detect_key_from_pitch_histogram(chroma)
+    return res["root"], res["mode"], res["confidence"]
 
 
 def detect_song_key(
@@ -202,10 +277,11 @@ def soft_snap_to_scale(
     min_confidence: float = KEY_MIN_CONFIDENCE_FOR_SNAP,
 ) -> int:
     """
-    PLAN.md Phase 5.5: Soft scale prior.
-    No snap at all when key confidence < 0.6.
-    If |midi_float - nearest_scale_tone| <= 0.35 st, snap to that scale tone.
-    Otherwise keep the rounded measured pitch.
+    Phase 5.1: Harmonic Key & Scale Snapping (Auto-Tonleiter).
+    Soft-snap ambiguous microtonal notes to scale degrees:
+      P_snapped = argmin_{k in Scale} |P_raw - k|  if |P_raw - k| <= 0.35 semitones
+    Preserves intentional blue notes while eliminating vibrato jitter.
+    No snap when confidence < min_confidence (0.60) or scale_pcs is empty.
     """
     if np.isnan(midi_float):
         return 60
@@ -218,10 +294,10 @@ def soft_snap_to_scale(
     if (rounded % 12) in scale_pcs:
         return rounded
 
-    # Search nearest in-scale tone (within ±1 semitone)
-    best_diff = 999.0
+    # Search nearest in-scale tone k in Scale (within ±2 semitones of rounded)
+    best_diff = float("inf")
     best_candidate = rounded
-    for offset in [-1, 1]:
+    for offset in range(-2, 3):
         cand = rounded + offset
         if (cand % 12) in scale_pcs:
             diff = abs(midi_float - cand)
@@ -280,56 +356,8 @@ def _track_f0_fcpe(
     hop_sec: float = 0.010,
 ) -> Dict[str, Any]:
     """Fast Context-based Pitch Estimation (singing-oriented neural tracker)."""
-    import torch
-    import torchfcpe
-
-    if device is None:
-        if torch.backends.mps.is_available():
-            device = "mps"
-        elif torch.cuda.is_available():
-            device = "cuda"
-        else:
-            device = "cpu"
-
-    target_sr = 16000
-    if sr != target_sr:
-        if librosa is not None:
-            audio_16k = librosa.resample(audio, orig_sr=sr, target_sr=target_sr)
-        else:
-            audio_16k = audio
-    else:
-        audio_16k = audio
-
-    # Ensure float32 tensor
-    wav_tensor = torch.from_numpy(audio_16k.astype(np.float32)).unsqueeze(0)
-    if device != "cpu":
-        try:
-            wav_tensor = wav_tensor.to(device)
-        except Exception:
-            device = "cpu"
-
-    try:
-        model = torchfcpe.spawn_bundled_infer_model(device=device)
-    except Exception:
-        model = torchfcpe.spawn_bundled_infer_model(device="cpu")
-
-    # torchfcpe infer with 16kHz
-    f0_tensor = model.infer(wav_tensor, sr=target_sr)
-    f0_np = f0_tensor.squeeze().detach().cpu().numpy()
-
-    # Unvoiced frames in torchfcpe return 0.0 -> map to NaN (Phase 5.2 requirement)
-    f0_hz = np.where(f0_np > 0.0, f0_np, np.nan)
-    voiced_prob = np.where(f0_np > 0.0, 1.0, 0.0)
-
-    num_frames = len(f0_hz)
-    t = np.arange(num_frames) * hop_sec
-
-    return {
-        "t": t,
-        "f0_hz": f0_hz,
-        "voiced_prob": voiced_prob,
-        "hop_sec": hop_sec,
-    }
+    from karaoke.pitch_neural import track_f0_fcpe
+    return track_f0_fcpe(audio, sr, device=device, hop_sec=hop_sec)
 
 
 def _track_f0_crepe(
@@ -434,9 +462,9 @@ def _track_f0_rmvpe(
     device: Optional[str] = None,
     hop_sec: float = 0.010,
 ) -> Dict[str, Any]:
-    """RMVPE pitch tracker if installed, else raises ImportError."""
-    import rmvpe  # noqa: F401
-    raise NotImplementedError("RMVPE backend adapter")
+    """RMVPE pitch tracker if installed, else fallback to FCPE."""
+    from karaoke.pitch_neural import track_f0_rmvpe
+    return track_f0_rmvpe(audio, sr, device=device, hop_sec=hop_sec)
 
 
 def clean_f0(
@@ -454,7 +482,9 @@ def clean_f0(
     3. Octave-jump repair by continuity: if a frame is ≈ ±12 st (±1 st tolerance)
        from the median of its voiced neighbours (±15 frames), shift it by ∓12.
     4. Global tuning estimate: histogram of (midi - round(midi)) * 100 in cents
-       weighted by voiced prob; take circular mean of the mode. Subtract it (clamp ±50 cents).
+       weighted by voiced prob; take circular mean of the mode.
+       Clamp tuning_cents adjustment to ±15 cents maximum.
+       Only apply global tuning shift if circular mode confidence >= 0.85.
     5. Convert to MIDI float; keep float until final rounding.
     6. Vibrato suppression: low-pass at ~5 Hz (Butterworth on voiced runs).
 
@@ -556,12 +586,23 @@ def clean_f0(
         if np.any(mode_mask):
             angles = cents_dev[mode_mask] * (2.0 * np.pi / 100.0)
             w_mode = valid_weights[mode_mask]
+            w_sum = np.sum(w_mode)
             mean_sin = np.sum(w_mode * np.sin(angles))
             mean_cos = np.sum(w_mode * np.cos(angles))
-            circ_angle = np.arctan2(mean_sin, mean_cos)
-            tuning_cents = float(np.clip(circ_angle * (100.0 / (2.0 * np.pi)), -TUNING_MAX_CORRECTION_CENTS, TUNING_MAX_CORRECTION_CENTS))
-            # Subtract global tuning offset
-            midi_float = midi_float - (tuning_cents / 100.0)
+            circ_conf = float(np.sqrt(mean_sin**2 + mean_cos**2) / (w_sum + 1e-8)) if w_sum > 0 else 0.0
+
+            # OVERHAUL_PLAN Phase 5.2: Clamp Global Tuning Drift
+            # Limit tuning_cents adjustment to +/- 15 cents maximum.
+            # Only apply global tuning shift if circular mode confidence >= 0.85 and mode is reasonable (|mode_center| <= 25c).
+            # Otherwise, leave pitches unshifted (tuning_cents = 0.0) to avoid accidental whole-tone displacements.
+            if circ_conf >= TUNING_MIN_CONFIDENCE and abs(mode_center) <= 25.0:
+                circ_angle = np.arctan2(mean_sin, mean_cos)
+                raw_tuning = circ_angle * (100.0 / (2.0 * np.pi))
+                tuning_cents = float(np.clip(raw_tuning, -TUNING_MAX_CORRECTION_CENTS, TUNING_MAX_CORRECTION_CENTS))
+                # Subtract global tuning offset
+                midi_float = midi_float - (tuning_cents / 100.0)
+            else:
+                tuning_cents = 0.0
 
     # 6. Vibrato suppression: Butterworth low-pass at ~5 Hz on voiced runs
     # Sampling frequency of frames is 100 Hz (10 ms hop), Nyquist = 50 Hz.
@@ -593,6 +634,107 @@ def clean_f0(
     return midi_float, v_prob, tuning_cents
 
 
+def apply_harmonic_octave_continuity_filter(
+    pitch_data: Dict[str, Any],
+    sr: int = 16000,
+    max_semitone_leap_rate: float = 11.0,
+) -> Dict[str, Any]:
+    """
+    Breakthrough 5: Harmonic Octave Continuity Filter (HOCF).
+
+    Detects and eliminates octave-halving and octave-doubling errors caused by falsetto leaps,
+    subharmonic register tracking, and pitch tracker ambiguity.
+    Enforces human vocal tract physical continuity constraints across continuous voiced frames.
+    """
+    f0_raw = pitch_data.get("midi") if "midi" in pitch_data else pitch_data.get("pitches")
+    if f0_raw is None or len(f0_raw) == 0:
+        return pitch_data
+
+    f0 = np.copy(f0_raw)
+    n = len(f0)
+
+    # Timestamps grid (either provided or derived from frame_dur_sec / hop_sec)
+    if "timestamps" in pitch_data and pitch_data["timestamps"] is not None:
+        timestamps = np.asarray(pitch_data["timestamps"], dtype=float)
+    elif "t" in pitch_data and pitch_data["t"] is not None:
+        timestamps = np.asarray(pitch_data["t"], dtype=float)
+    else:
+        hop = float(pitch_data.get("frame_dur_sec", 0.010))
+        timestamps = np.arange(n, dtype=float) * hop
+
+    # Confidence vector
+    if "confidence" in pitch_data and pitch_data["confidence"] is not None:
+        confidence = np.asarray(pitch_data["confidence"], dtype=float)
+    elif "conf" in pitch_data and pitch_data["conf"] is not None:
+        confidence = np.asarray(pitch_data["conf"], dtype=float)
+    else:
+        confidence = np.ones(n, dtype=float)
+
+    # Local tessitura running median (past 0.6 seconds = 60 frames at 10ms hop)
+    window_frames = 60
+    running_median = np.copy(f0)
+
+    for i in range(n):
+        w_start = max(0, i - window_frames)
+        w_end = min(n, i + window_frames // 2)
+        f0_slice = f0[w_start:w_end]
+        conf_slice = confidence[w_start:w_end]
+        valid = (~np.isnan(f0_slice)) & (f0_slice > 30) & (conf_slice > 0.45)
+        if np.any(valid):
+            running_median[i] = float(np.median(f0_slice[valid]))
+        else:
+            running_median[i] = f0[i]
+
+    # HOCF Correction Pass
+    num_corrections = 0
+    for i in range(1, n):
+        if np.isnan(f0[i]) or f0[i] <= 30 or confidence[i] < 0.45:
+            continue
+
+        # Check if frame is continuous with previous frame (< 60ms pause)
+        dt = timestamps[i] - timestamps[i - 1]
+        if dt > 0.060:
+            continue
+
+        delta_tessitura = f0[i] - running_median[i]
+
+        # 1. Octave Doubling Detection (+12 semitones away from running median)
+        if 10.5 <= delta_tessitura <= 13.5:
+            f0[i] -= 12.0
+            num_corrections += 1
+        # 2. Octave Halving Detection (-12 semitones away from running median)
+        elif -13.5 <= delta_tessitura <= -10.5:
+            f0[i] += 12.0
+            num_corrections += 1
+        # 3. Double Octave Doubling Detection (+24 semitones away from running median)
+        elif 22.5 <= delta_tessitura <= 25.5:
+            f0[i] -= 24.0
+            num_corrections += 1
+        # 4. Double Octave Halving Detection (-24 semitones away from running median)
+        elif -25.5 <= delta_tessitura <= -22.5:
+            f0[i] += 24.0
+            num_corrections += 1
+
+    pitch_data["midi"] = f0
+    pitch_data["pitches"] = f0
+    pitch_data["timestamps"] = timestamps
+    pitch_data["t"] = timestamps
+    pitch_data["confidence"] = confidence
+    pitch_data["hocf_applied"] = True
+    pitch_data["hocf_corrections"] = num_corrections
+
+    if "raw_f0_hz" in pitch_data and pitch_data["raw_f0_hz"] is not None:
+        raw_f0 = np.copy(pitch_data["raw_f0_hz"])
+        valid_m = (~np.isnan(f0)) & (f0 > 0)
+        raw_f0[valid_m] = 440.0 * (2.0 ** ((f0[valid_m] - 69.0) / 12.0))
+        pitch_data["raw_f0_hz"] = raw_f0
+
+    if num_corrections > 0:
+        print(f"🎯 HOCF: {num_corrections} Frames mit Oktav-Fehlern korrigiert.")
+
+    return pitch_data
+
+
 def analyze_vocal_pitch(
     vocals_path: Path | str,
     pitch_engine: str = "fcpe",
@@ -614,6 +756,8 @@ def analyze_vocal_pitch(
     if stage_cache:
         cached_f0 = stage_cache.load_f0(pitch_engine=pitch_engine, crepe_model=crepe_model)
         if cached_f0 is not None:
+            if not cached_f0.get("hocf_applied", False):
+                cached_f0 = apply_harmonic_octave_continuity_filter(cached_f0, sr=cached_f0.get("sr", 16000))
             print(f"⚡ Verwende gecachte f0 Pitch-Kontur ({pitch_engine}): {cached_f0['total_frames']} Frames")
             if progress_cb:
                 progress_cb("pitch", 1.0, f"Loaded {cached_f0['total_frames']} frames from cache")
@@ -688,9 +832,13 @@ def analyze_vocal_pitch(
     result = {
         "type": "contour",
         "frame_dur_sec": hop_sec,
+        "timestamps": t,
+        "t": t,
         "midi": midi_float,           # Cleaned MIDI float (NaN for unvoiced)
+        "pitches": midi_float,        # Standardized pitch vector alias
         "raw_f0_hz": f0_hz[:min_len],
         "conf": cleaned_conf,
+        "confidence": cleaned_conf,
         "rms": rms,
         "total_frames": min_len,
         "tuning_cents": tuning_cents,
@@ -698,6 +846,9 @@ def analyze_vocal_pitch(
         "sr": sr,
         "audio_path": str(vocals_path),
     }
+
+    # Breakthrough 5: Apply Harmonic Octave Continuity Filter (HOCF)
+    result = apply_harmonic_octave_continuity_filter(result, sr=sr)
 
     if stage_cache:
         stage_cache.save_f0(result, pitch_engine=pitch_engine, crepe_model=crepe_model)
@@ -731,7 +882,8 @@ def get_syllable_pitch(
     2. Pitch = weighted median of cleaned MIDI floats (weights = conf * rms).
     Returns int by default, or (midi_float, rounded_int) if return_float=True.
     """
-    frame_dur = pitch_data["frame_dur_sec"]
+    frame_dur = float(pitch_data.get("frame_dur_sec", 0.010))
+    total_frames = int(pitch_data.get("total_frames", len(pitch_data.get("midi", []))))
     dur = end_sec - start_sec
 
     # Core region: skip first 20% and last 10%
@@ -746,7 +898,7 @@ def get_syllable_pitch(
         core_end = end_sec
 
     start_frame = max(0, int(core_start / frame_dur))
-    end_frame = min(pitch_data["total_frames"], int(core_end / frame_dur))
+    end_frame = min(total_frames, int(core_end / frame_dur))
 
     if end_frame <= start_frame:
         start_frame = max(0, int(start_sec / frame_dur))
@@ -756,9 +908,15 @@ def get_syllable_pitch(
             ret_i = int(round(fallback_pitch))
             return (ret_f, ret_i) if return_float else ret_i
 
-    midi_slice = pitch_data["midi"][start_frame:end_frame]
+    midi_arr = pitch_data.get("midi") if "midi" in pitch_data else pitch_data.get("pitches")
+    if midi_arr is None:
+        ret_f = float(fallback_pitch)
+        ret_i = int(round(fallback_pitch))
+        return (ret_f, ret_i) if return_float else ret_i
+
+    midi_slice = midi_arr[start_frame:end_frame]
     conf_slice = pitch_data["conf"][start_frame:end_frame]
-    rms_slice = pitch_data["rms"][start_frame:end_frame]
+    rms_slice = pitch_data["rms"][start_frame:end_frame] if "rms" in pitch_data else np.ones_like(conf_slice)
 
     # Voiced frames only (non-NaN and conf >= 0.35)
     voiced_mask = (~np.isnan(midi_slice)) & (conf_slice >= 0.35)
@@ -768,9 +926,9 @@ def get_syllable_pitch(
         full_sf = max(0, int(start_sec / frame_dur))
         full_ef = min(pitch_data["total_frames"], int(end_sec / frame_dur))
         if full_ef > full_sf:
-            midi_slice = pitch_data["midi"][full_sf:full_ef]
+            midi_slice = midi_arr[full_sf:full_ef]
             conf_slice = pitch_data["conf"][full_sf:full_ef]
-            rms_slice = pitch_data["rms"][full_sf:full_ef]
+            rms_slice = pitch_data["rms"][full_sf:full_ef] if "rms" in pitch_data else np.ones_like(conf_slice)
             voiced_mask = (~np.isnan(midi_slice)) & (conf_slice >= 0.30)
 
     if not np.any(voiced_mask):
@@ -805,11 +963,12 @@ def detect_syllable_split(
     fallback_pitch: float = 60.0,
 ) -> Optional[List[Tuple[float, float, float, int]]]:
     """
-    PLAN.md Phase 5.4: Melisma / Step Split Detection (Fix for P2).
+    OVERHAUL_PLAN Phase 5.1: Restrict Melisma Splits (Fix for Spurious Double Tones).
     Split ONLY if ALL of these hold:
-    - syllable duration >= 500 ms (or >= 350 ms if tilde marker),
-    - segment cleaned contour with change-point step detector (ruptures PELT). Both plateaus >= 150 ms,
-    - plateau medians differ by >= 2 semitones (or >= 1 st if tilde) and std-dev < 0.6 st each,
+    - syllable duration >= 700 ms (or >= 350 ms if tilde or hyphen marker present),
+    - segment cleaned contour with change-point step detector (ruptures PELT). Both plateaus >= 250 ms,
+    - plateau medians differ by >= 2.5 semitones (or >= 1 st if tilde) and std-dev < 0.6 st each,
+    - Portamento / Scoop Filter: fit linear regression across syllable; if R^2 > 0.70 and monotonic glide, do not split,
     - Basic Pitch agrees on the change when available.
     Returns:
         [(s1, e1, float1, int1), (s2, e2, float2, int2)] or None.
@@ -822,10 +981,15 @@ def detect_syllable_split(
     frame_dur = pitch_data["frame_dur_sec"]
     sf_idx = max(0, int(start_sec / frame_dur))
     ef_idx = min(pitch_data["total_frames"], int(end_sec / frame_dur))
-    if ef_idx - sf_idx < 30:  # < 300 ms of data
+    min_required_frames = int(min_dur / frame_dur)
+    if ef_idx - sf_idx < min_required_frames:
         return None
 
-    midis = pitch_data["midi"][sf_idx:ef_idx]
+    midi_arr = pitch_data.get("midi") if "midi" in pitch_data else pitch_data.get("pitches")
+    if midi_arr is None:
+        return None
+
+    midis = midi_arr[sf_idx:ef_idx]
     confs = pitch_data["conf"][sf_idx:ef_idx]
     voiced_mask = (~np.isnan(midis)) & (confs >= 0.35)
 
@@ -839,28 +1003,57 @@ def detect_syllable_split(
     if len(voiced_indices) < 20:
         return None
 
+    # Portamento / Scoop Filter (Phase 5.1):
+    # Fit a linear regression line to the pitch contour across the syllable.
+    # If R^2_linear > 0.70 and monotonic, classify as a natural vocal glide and do not split.
+    x_pts = voiced_indices.astype(float)
+    y_pts = midis[voiced_indices].astype(float)
+    poly = np.polyfit(x_pts, y_pts, 1)
+    slope = float(poly[0])
+    y_pred = slope * x_pts + float(poly[1])
+    ss_res = float(np.sum((y_pts - y_pred) ** 2))
+    ss_tot = float(np.sum((y_pts - np.mean(y_pts)) ** 2))
+    r2_linear = 1.0 - (ss_res / ss_tot) if ss_tot > 1e-4 else 0.0
+
+    if r2_linear > 0.70 and abs(slope) > 1e-4:
+        # Check monotonicity of the vocal glide
+        mid_idx = len(y_pts) // 2
+        slope_h1 = float(np.polyfit(x_pts[:mid_idx], y_pts[:mid_idx], 1)[0])
+        slope_h2 = float(np.polyfit(x_pts[mid_idx:], y_pts[mid_idx:], 1)[0])
+
+        y_smooth = scipy.signal.medfilt(y_pts, 5) if len(y_pts) >= 5 else y_pts
+        diffs = np.diff(y_smooth)
+
+        if slope > 0:
+            is_monotonic = (slope_h1 >= 0.20 * slope) and (slope_h2 >= 0.20 * slope) and (np.mean(diffs >= -0.10) >= 0.85)
+        else:
+            is_monotonic = (slope_h1 <= 0.20 * slope) and (slope_h2 <= 0.20 * slope) and (np.mean(diffs <= 0.10) >= 0.85)
+
+        if is_monotonic:
+            return None
+
     interpolated_midis = np.interp(indices, voiced_indices, midis[voiced_indices])
 
     # Run ruptures Pelt change-point detector
+    min_plateau_frames = int(SPLIT_MIN_PLATEAU_DUR_SEC / frame_dur)  # 25 frames = 250 ms
     try:
         import ruptures as rpt
-        # min_size = 15 frames = 150 ms
-        algo = rpt.Pelt(model="l2", min_size=15).fit(interpolated_midis)
+        algo = rpt.Pelt(model="l2", min_size=min_plateau_frames).fit(interpolated_midis)
         # Penalty 2.5: conservative step penalty
         bkps = algo.predict(pen=2.5)
     except Exception:
         return None
 
-    # Filter breakpoints to find 2 distinct plateaus >= 150 ms
+    # Filter breakpoints to find 2 distinct plateaus >= 250 ms
     valid_split_point = None
-    min_plateau_frames = int(SPLIT_MIN_PLATEAU_DUR_SEC / frame_dur)  # 15 frames
 
     for bkp in bkps[:-1]:  # bkps ends with len(interpolated_midis)
         if bkp >= min_plateau_frames and (len(interpolated_midis) - bkp) >= min_plateau_frames:
             # Check plateau medians and standard deviations
             seg1_voiced = voiced_mask[:bkp]
             seg2_voiced = voiced_mask[bkp:]
-            if np.sum(seg1_voiced) < 8 or np.sum(seg2_voiced) < 8:
+            min_voiced_plateau = max(8, int(min_plateau_frames * 0.4))
+            if np.sum(seg1_voiced) < min_voiced_plateau or np.sum(seg2_voiced) < min_voiced_plateau:
                 continue
 
             m1 = midis[:bkp][seg1_voiced]
@@ -936,5 +1129,9 @@ def mask_background_regions(
         sf = max(0, int(b_start / frame_dur))
         ef = min(total_frames, int(b_end / frame_dur))
         if ef > sf:
-            pitch_data["midi"][sf:ef] = np.nan
-            pitch_data["conf"][sf:ef] = 0.0
+            if "midi" in pitch_data:
+                pitch_data["midi"][sf:ef] = np.nan
+            if "pitches" in pitch_data:
+                pitch_data["pitches"][sf:ef] = np.nan
+            if "conf" in pitch_data:
+                pitch_data["conf"][sf:ef] = 0.0

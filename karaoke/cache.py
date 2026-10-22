@@ -86,15 +86,25 @@ class StageCache:
                 return None
         try:
             with np.load(p) as data:
+                midi_arr = data["midi"] if "midi" in data else data.get("pitches")
+                conf_arr = data["conf"] if "conf" in data else data.get("confidence")
+                frame_dur = float(data["frame_dur_sec"])
+                total_f = int(data["total_frames"]) if "total_frames" in data else len(midi_arr)
+                ts = data["timestamps"] if "timestamps" in data else (np.arange(total_f) * frame_dur)
                 return {
                     "type": str(data["type"]) if "type" in data else "contour",
-                    "frame_dur_sec": float(data["frame_dur_sec"]),
-                    "midi": data["midi"],
-                    "conf": data["conf"],
+                    "frame_dur_sec": frame_dur,
+                    "timestamps": ts,
+                    "t": ts,
+                    "midi": midi_arr,
+                    "pitches": midi_arr,
+                    "conf": conf_arr,
+                    "confidence": conf_arr,
                     "rms": data["rms"],
-                    "total_frames": int(data["total_frames"]) if "total_frames" in data else len(data["midi"]),
+                    "total_frames": total_f,
                     "sr": int(data["sr"]) if "sr" in data else 16000,
-                    "audio": data["audio"] if "audio" in data else None
+                    "audio": data["audio"] if "audio" in data else None,
+                    "hocf_applied": bool(data["hocf_applied"]) if "hocf_applied" in data else False,
                 }
         except Exception:
             return None
@@ -103,15 +113,21 @@ class StageCache:
         p = self.get_f0_path(pitch_engine, crepe_model)
         generic_p = self.cache_dir / "f0.npz"
         try:
+            midi_arr = pitch_data.get("midi") if "midi" in pitch_data else pitch_data.get("pitches")
+            conf_arr = pitch_data.get("conf") if "conf" in pitch_data else pitch_data.get("confidence")
             kwargs = {
                 "type": pitch_data.get("type", "contour"),
                 "frame_dur_sec": pitch_data["frame_dur_sec"],
-                "midi": pitch_data["midi"],
-                "conf": pitch_data["conf"],
+                "midi": midi_arr,
+                "pitches": midi_arr,
+                "conf": conf_arr,
                 "rms": pitch_data["rms"],
-                "total_frames": pitch_data.get("total_frames", len(pitch_data["midi"])),
-                "sr": pitch_data.get("sr", 16000)
+                "total_frames": pitch_data.get("total_frames", len(midi_arr)),
+                "sr": pitch_data.get("sr", 16000),
+                "hocf_applied": bool(pitch_data.get("hocf_applied", False)),
             }
+            if "timestamps" in pitch_data and pitch_data["timestamps"] is not None:
+                kwargs["timestamps"] = pitch_data["timestamps"]
             if pitch_data.get("audio") is not None:
                 kwargs["audio"] = pitch_data["audio"]
             np.savez_compressed(p, **kwargs)

@@ -34,6 +34,12 @@ try:
 except ImportError:
     sf = None
 
+try:
+    import scipy.signal
+    import scipy.ndimage
+except ImportError:
+    pass
+
 from karaoke.config import (
     ONSET_SNAP_WINDOW_SEC,
     SILENT_GAP_NOTE_END_SEC,
@@ -47,103 +53,18 @@ from karaoke.lyrics_io import split_syllables, count_phonetic_syllables
 from karaoke.hardware import HardwareProfile, detect_hardware
 
 
-# ==============================================================================
-# 1. Text Normalization for MMS Forced Aligner
-# ==============================================================================
-
-# MMS FA dictionary supported characters
-MMS_VALID_CHARS = set("'abcdefghijklmnopqrstuvwxyz")
-
-
-def clean_word_for_mms(word: str) -> str:
-    """
-    Cleans a word for MMS CTC tokenization:
-    - Lowercases text
-    - Transliterates German umlauts and special characters
-    - Keeps only characters present in the MMS vocabulary (a-z and apostrophe)
-    """
-    w = word.lower().strip()
-    # German umlauts and ligature transliterations
-    w = w.replace('ä', 'ae').replace('ö', 'oe').replace('ü', 'ue').replace('ß', 'ss')
-    # Accented Latin vowels (French, Spanish)
-    w = re.sub(r'[àáâãå]', 'a', w)
-    w = re.sub(r'[èéêë]', 'e', w)
-    w = re.sub(r'[ìíîï]', 'i', w)
-    w = re.sub(r'[òóôõ]', 'o', w)
-    w = re.sub(r'[ùúû]', 'u', w)
-    w = re.sub(r'[ýÿ]', 'y', w)
-    w = re.sub(r'[ç]', 'c', w)
-    w = re.sub(r'[ñ]', 'n', w)
-    # Strip any punctuation except apostrophe
-    w = re.sub(r"[^\w']+", '', w)
-    # Filter to MMS dictionary
-    return ''.join(c for c in w if c in MMS_VALID_CHARS)
-
-
-# ==============================================================================
-# 2. MMS Forced Aligner
-# ==============================================================================
-
-class MMSForcedAligner:
-    """
-    Multilingual CTC Forced Aligner using torchaudio's MMS_FA pipeline.
-    """
-    _instance: Optional[MMSForcedAligner] = None
-
-    def __init__(self, device: Optional[str] = None):
-        if torchaudio is None or torch is None:
-            raise ImportError("PyTorch and TorchAudio are required for MMS Forced Alignment.")
-        
-        self.device = device or ("cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu"))
-        # Some MPS ops can fall back to CPU safely if needed
-        self.bundle = torchaudio.pipelines.MMS_FA
-        self.sample_rate = self.bundle.sample_rate
-        
-        try:
-            self.model = self.bundle.get_model().to(self.device)
-            self.model.eval()
-        except Exception:
-            # Fallback to CPU if device fails
-            self.device = "cpu"
-            self.model = self.bundle.get_model().to("cpu")
-            self.model.eval()
-
-        self.tokenizer = self.bundle.get_tokenizer()
-        self.aligner = self.bundle.get_aligner()
-
-    @classmethod
-    def get_instance(cls, device: Optional[str] = None) -> MMSForcedAligner:
-        if cls._instance is None:
-            cls._instance = MMSForcedAligner(device=device)
-        return cls._instance
-
-    def align_chunk(
-        self,
-        waveform_chunk: torch.Tensor,
-        words: List[str],
-    ) -> List[Optional[List[Any]]]:
-        """
-        Runs CTC forced alignment on a single audio chunk for the given words.
-        Returns a list of token spans per word, or None if alignment fails.
-        """
-        if waveform_chunk.ndim == 1:
-            waveform_chunk = waveform_chunk.unsqueeze(0)
-        elif waveform_chunk.shape[0] > 1:
-            waveform_chunk = torch.mean(waveform_chunk, dim=0, keepdim=True)
-
-        if waveform_chunk.shape[1] < 160:  # < 10ms
-            return [None] * len(words)
-
-        tokens = self.tokenizer(words)
-        try:
-            chunk_dev = waveform_chunk.to(self.device)
-            with torch.inference_mode():
-                emission, _ = self.model(chunk_dev)
-            spans = self.aligner(emission[0].cpu(), tokens)
-            ratio = (waveform_chunk.shape[1] / emission.shape[1]) / self.sample_rate
-            return spans, ratio
-        except Exception:
-            return None, 0.0
+from karaoke.align_mms import (
+    MMS_VALID_CHARS,
+    spell_number,
+    clean_word_for_mms,
+    clean_raw_lyrics_lines,
+    MMSForcedAligner,
+    load_mms_pipeline,
+    forced_align_words,
+    align_plain_lyrics_mms,
+    align_lyrics_doc_mms,
+    align_whisper_words_mms,
+)
 
 
 # ==============================================================================
@@ -181,6 +102,155 @@ def load_audio_mono(audio_path: Path | str, target_sr: int = 16000) -> Tuple[np.
 VOWELS_REGEX = re.compile(r'[aeiouyäöüAEIOUYÄÖÜ]')
 
 
+def segment_word_syllables_acoustically(
+    syllables: List[str],
+    start: float,
+    end: float,
+    vocal_audio: Optional[np.ndarray],
+    sr: int = 16000,
+    lang: str = "de",
+) -> Optional[List[Dict[str, Any]]]:
+    """
+    Phase 4: Formant & Energy-Based Syllable Boundary Detection.
+    - Extracts RMS energy and spectral flux across the word window at 10ms resolution.
+    - Finds N dominant energy peaks corresponding to the N phonetic vowel nuclei.
+    - Places syllable boundaries at local energy valleys (minima) between consecutive peaks.
+    Guarantees:
+    - Held syllables naturally capture wide energy plateaus.
+    - Fast unstressed syllables narrow to their actual acoustic bursts.
+    - Returns None on missing audio / silence to fall back to vowel nucleus weighting.
+    """
+    N = len(syllables)
+    if N <= 1:
+        return None
+
+    if vocal_audio is None or len(vocal_audio) == 0 or librosa is None:
+        return None
+
+    total_dur = max(0.030, end - start)
+    # Check if vocal_audio is full track or chunk
+    if len(vocal_audio) > int((total_dur + 0.5) * sr) and start >= 0:
+        start_samp = max(0, int(round(start * sr)))
+        end_samp = min(len(vocal_audio), int(round(end * sr)))
+        vocal_chunk = vocal_audio[start_samp:end_samp]
+    else:
+        vocal_chunk = vocal_audio
+
+    if len(vocal_chunk) < 320:
+        return None
+
+    hop_length = int(round(0.010 * sr))
+    frame_length = 2 * hop_length
+    try:
+        rms = librosa.feature.rms(y=vocal_chunk, frame_length=frame_length, hop_length=hop_length)[0]
+    except Exception:
+        return None
+
+    try:
+        flux = librosa.onset.onset_strength(y=vocal_chunk, sr=sr, hop_length=hop_length)
+    except Exception:
+        flux = np.zeros_like(rms)
+
+    min_len = min(len(rms), len(flux))
+    if min_len < 3 * N:  # Need at least 30ms per syllable
+        return None
+
+    rms = rms[:min_len]
+    flux = flux[:min_len]
+    max_rms = float(np.max(rms))
+    if max_rms < 1e-4:
+        return None
+
+    import scipy.signal
+    import scipy.ndimage
+
+    smoothed_rms = scipy.ndimage.gaussian_filter1d(rms, sigma=1.5)
+    rms_max = float(np.max(smoothed_rms)) + 1e-8
+    flux_max = float(np.max(flux)) + 1e-8
+    flux_norm = flux / flux_max
+
+    cost = (rms_max - smoothed_rms) + 0.25 * rms_max * flux_norm
+    min_dist = max(3, int(min_len / (N * 2.0)))
+    valleys, props = scipy.signal.find_peaks(cost, distance=min_dist, prominence=max_rms * 0.04)
+
+    K = len(valleys)
+    needed = N - 1
+    if K == needed:
+        selected_valleys = list(valleys)
+    elif K > needed:
+        proms = props["prominences"]
+        top_idx = sorted(range(K), key=lambda i: proms[i], reverse=True)[:needed]
+        selected_valleys = sorted([valleys[i] for i in top_idx])
+    else:
+        # Fewer than needed valleys found: find peaks per sector and place boundary at local minimum
+        weights = []
+        for syl in syllables:
+            s_clean = syl.lower()
+            has_vowel = bool(VOWELS_REGEX.search(s_clean))
+            base_w = 1.0 if has_vowel else 0.5
+            onset_m = re.match(r'^[^aeiouyäöü]+', s_clean)
+            onset_c = len(onset_m.group(0)) if onset_m else 0
+            weights.append(base_w + 0.15 * onset_c)
+        tot_w = sum(weights) or 1.0
+        norm_w = [w / tot_w for w in weights]
+
+        seg_bounds = [0]
+        cur_f = 0.0
+        for nw in norm_w:
+            cur_f += nw * min_len
+            seg_bounds.append(int(round(cur_f)))
+        seg_bounds[-1] = min_len
+
+        peaks = []
+        for k in range(N):
+            fs, fe = seg_bounds[k], seg_bounds[k+1]
+            if fe > fs:
+                p_rel = np.argmax(smoothed_rms[fs:fe])
+                peaks.append(fs + p_rel)
+            else:
+                peaks.append(fs)
+        for k in range(1, len(peaks)):
+            if peaks[k] <= peaks[k-1]:
+                peaks[k] = min(min_len - 1, peaks[k-1] + 2)
+
+        selected_valleys = []
+        prev_v = 0
+        for k in range(N - 1):
+            p1, p2 = peaks[k], peaks[k+1]
+            if p2 > p1:
+                v_rel = np.argmin(smoothed_rms[p1:p2+1])
+                v = p1 + v_rel
+            else:
+                v = p1 + 1
+            min_f = prev_v + 3
+            max_f = min_len - 3 * (N - 1 - k)
+            v = max(min_f, min(max_f, v))
+            selected_valleys.append(v)
+            prev_v = v
+
+    result = []
+    curr_start = start
+    for s_idx, syl in enumerate(syllables):
+        if s_idx == N - 1:
+            s_end = end
+        else:
+            s_end = round(start + selected_valleys[s_idx] * 0.010, 3)
+
+        s_dur = max(0.030, s_end - curr_start)
+        actual_end = round(curr_start + s_dur, 3)
+        is_last = (s_idx == N - 1)
+        text = f"{syl} " if is_last else f"{syl}-"
+        result.append({
+            "word": text,
+            "start": round(curr_start, 3),
+            "end": actual_end,
+            "is_syllable": True,
+        })
+        curr_start = actual_end
+
+    return result
+
+
 def distribute_word_syllables(
     word: str,
     start: float,
@@ -189,15 +259,15 @@ def distribute_word_syllables(
     char_spans: Optional[List[Tuple[str, float, float]]] = None,
     is_last_in_phrase: bool = False,
     has_pause_after: bool = False,
+    vocal_audio: Optional[np.ndarray] = None,
+    sr: int = 16000,
 ) -> List[Dict[str, Any]]:
     """
     Distributes a word's duration across its phonetic syllables.
     - If char_spans (character-level CTC boundaries) are provided and match, uses them.
-    - Otherwise, distributes via the Task 2 vowel-nucleus weighted formula:
-      - Base weight: 1.0 (vowel present) or 0.5 (no vowel)
-      - Onset consonant cluster: +0.15 per consonant before the vowel
-      - Last syllable of word: +20% (* 1.2) for phrase lengthening
-      - Words before a pause / phrase end: +20% (* 1.2) for pause lengthening
+    - If vocal_audio is provided: extracts RMS energy & spectral flux and segments
+      syllable boundaries at energy valleys (Phase 4 acoustic boundary detection).
+    - Otherwise (or on fallback), distributes via vowel-nucleus weighted formula.
     """
     total_dur = max(0.030, end - start)
     clean_w = word.strip()
@@ -242,7 +312,28 @@ def distribute_word_syllables(
                     result[i]["start"] = round(mid, 3)
             return result
 
-    # Case B: Vowel-nucleus weighted split (Task 2 specification)
+    # Case B: Acoustic-driven syllable segmentation (Phase 3)
+    if vocal_audio is not None and len(vocal_audio) > 0:
+        try:
+            from karaoke.syllables_acoustic import slice_word_syllables_acoustically
+            acoustic_sylls = slice_word_syllables_acoustically(
+                word_item={
+                    "word": clean_w,
+                    "start": start,
+                    "end": end,
+                    "line_break_after": is_last_in_phrase,
+                },
+                vocal_audio_segment=vocal_audio,
+                sr=sr,
+                lang=lang,
+                detect_melisma=False,
+            )
+            if acoustic_sylls is not None and len(acoustic_sylls) == num_sylls:
+                return acoustic_sylls
+        except Exception:
+            pass
+
+    # Case C: Vowel-nucleus weighted split fallback (Task 2 specification)
     weights = []
     for s_idx, syl in enumerate(syllables):
         s_clean = syl.lower()
@@ -322,15 +413,16 @@ def snap_syllables_to_audio(
 
     # Detect unvoiced -> voiced transition frames if f0 is available
     f0_transition_frames = set()
-    if pitch_data and "pitches" in pitch_data:
-        pitches = pitch_data["pitches"]
-        for t in range(1, len(pitches)):
-            p_prev = pitches[t-1]
-            p_curr = pitches[t]
-            prev_voiced = (not np.isnan(p_prev)) and (p_prev > 0)
-            curr_voiced = (not np.isnan(p_curr)) and (p_curr > 0)
-            if not prev_voiced and curr_voiced:
-                f0_transition_frames.add(t)
+    if pitch_data:
+        pitches = pitch_data.get("midi") if "midi" in pitch_data else pitch_data.get("pitches")
+        if pitches is not None:
+            for t in range(1, len(pitches)):
+                p_prev = pitches[t-1]
+                p_curr = pitches[t]
+                prev_voiced = (not np.isnan(p_prev)) and (p_prev > 0)
+                curr_voiced = (not np.isnan(p_curr)) and (p_curr > 0)
+                if not prev_voiced and curr_voiced:
+                    f0_transition_frames.add(t)
 
     window_frames = int(round(window_sec / hop_sec))  # ±12 frames for 120ms
     snapped = []
@@ -372,6 +464,18 @@ def snap_syllables_to_audio(
 
         new_start = round(best_frame * hop_sec, 3) if found_snap else orig_s
 
+        # Breakthrough 4: Refine onset using sub-frame spectral transient attack snapping (<= 8ms)
+        try:
+            from karaoke.transients import snap_onset_to_spectral_transient
+            new_start = snap_onset_to_spectral_transient(
+                rough_onset_sec=new_start,
+                y=vocal_audio,
+                sr=sr,
+                search_window_ms=35.0,
+            )
+        except Exception:
+            pass
+
         # Invariant constraints:
         # Never move earlier than prev_start + 0.030
         if new_start < prev_start + 0.030:
@@ -406,15 +510,18 @@ def prune_note_ends(
     """
     Task 5 Note End Pruning:
     note_end = min(syllable_end, last_voiced_frame + 40ms).
-    A note must not extend across a silent/unvoiced gap > 120ms.
+    A note must not extend across a silent/unvoiced gap >= 120ms.
     Guarantees minimum duration of 30ms.
     """
-    if not pitch_data or "pitches" not in pitch_data or not syllables:
+    if not pitch_data or not syllables:
         return syllables
 
-    pitches = pitch_data["pitches"]
+    pitches = pitch_data.get("midi") if "midi" in pitch_data else pitch_data.get("pitches")
+    if pitches is None or len(pitches) == 0:
+        return syllables
+
     num_frames = len(pitches)
-    hop_sec = 0.010  # 10ms frame resolution
+    hop_sec = float(pitch_data.get("frame_dur_sec", 0.010))
 
     pruned = []
     for s in syllables:
@@ -435,14 +542,17 @@ def prune_note_ends(
                 # min(syllable end, last voiced frame + 40ms)
                 cand_end = min(end_sec, last_voiced_sec + VOICED_TAIL_MARGIN_SEC)
 
-                # Check for silent/unvoiced gaps > 120ms within the voiced span
+                # Check for silent/unvoiced gaps >= 120ms within the voiced span
                 # An unvoiced run of >= 12 frames (120ms) truncates the note
                 curr_silent_len = 0
                 cut_sec = None
-                for idx, is_v in enumerate(voiced_mask):
+                first_voiced_idx = int(voiced_indices[0])
+                gap_frames_threshold = int(round(SILENT_GAP_NOTE_END_SEC / hop_sec))
+                for idx in range(first_voiced_idx, len(voiced_mask)):
+                    is_v = voiced_mask[idx]
                     if not is_v:
                         curr_silent_len += 1
-                        if curr_silent_len >= int(round(SILENT_GAP_NOTE_END_SEC / hop_sec)):
+                        if curr_silent_len >= gap_frames_threshold:
                             # Cut note at the start of the silent gap + 40ms
                             cut_idx = idx - curr_silent_len
                             cut_sec = (f_start + max(0, cut_idx)) * hop_sec + VOICED_TAIL_MARGIN_SEC
@@ -475,125 +585,14 @@ def align_lyrics_doc_to_audio(
 ) -> List[Dict[str, Any]]:
     """
     Main Phase 4 Alignment Entrypoint for canonical LyricsDoc.
-    - If doc is already syllable-synced: uses provider syllables after offset correction,
-      then applies audio snapping (Task 3) and note end pruning (Task 5).
-    - If doc is line-synced or word-synced: runs MMS CTC forced alignment on each line
-      prior window (±1.5s margin), distributes syllable timings (Task 2),
-      applies audio snapping (Task 3), and tags phrase line breaks (Task 6).
+    Delegates to MMS CTC Trellis forced aligner in karaoke.align_mms.
     """
-    offset = getattr(doc, "lyricsOffsetSec", 0.0)
-    sync_type = getattr(doc, "syncType", "line")
-    lang = getattr(doc, "language", "de") or "de"
-
-    # Load vocals audio at 16 kHz for aligner and snapping
-    vocal_audio_16k, sr = load_audio_mono(vocals_path, target_sr=16000)
-    audio_dur = len(vocal_audio_16k) / sr
-
-    # --------------------------------------------------------------------------
-    # Case 1: Syllable-synced lyrics
-    # --------------------------------------------------------------------------
-    if sync_type == "syllable":
-        raw_words = doc.to_words_list()
-        # Apply audio snapping
-        snapped = snap_syllables_to_audio(raw_words, vocal_audio_16k, sr=sr, pitch_data=pitch_data)
-        # Apply note end pruning
-        pruned = prune_note_ends(snapped, pitch_data=pitch_data)
-        return pruned
-
-    # --------------------------------------------------------------------------
-    # Case 2: Line-synced, word-synced, or static lyrics -> MMS Forced Alignment
-    # --------------------------------------------------------------------------
-    aligner_dev = hardware_profile.device if hardware_profile else None
-    aligner = MMSForcedAligner.get_instance(device=aligner_dev)
-    waveform_tensor = torch.from_numpy(vocal_audio_16k).unsqueeze(0)
-
-    final_syllables: List[Dict[str, Any]] = []
-
-    for line_idx, line in enumerate(doc.lines):
-        line_words_raw = [w for w in line.words.split() if w.strip()]
-        if not line_words_raw:
-            continue
-
-        line_start = max(0.0, line.start + offset)
-        line_end = max(line_start + 0.5, line.end + offset)
-
-        # Window prior with ±1.5s margin (Task 1)
-        win_start = max(0.0, line_start - 1.5)
-        win_end = min(audio_dur, line_end + 1.5)
-        start_samp = int(win_start * sr)
-        end_samp = int(win_end * sr)
-        chunk = waveform_tensor[:, start_samp:end_samp]
-
-        # Clean words for MMS
-        cleaned_pairs = [(r, clean_word_for_mms(r)) for r in line_words_raw]
-        valid_pairs = [(r, c) for r, c in cleaned_pairs if len(c) > 0]
-
-        aligned_for_line = []
-        if valid_pairs:
-            mms_words = [c for r, c in valid_pairs]
-            spans, ratio = aligner.align_chunk(chunk, mms_words)
-
-            if spans and len(spans) == len(valid_pairs):
-                for (raw_w, clean_w), sp in zip(valid_pairs, spans):
-                    if sp and len(sp) > 0:
-                        w_start = win_start + (sp[0].start * ratio)
-                        w_end = win_start + (sp[-1].end * ratio)
-                        char_spans = [
-                            (ch, win_start + s.start * ratio, win_start + s.end * ratio)
-                            for ch, s in zip(clean_w, sp)
-                        ]
-                        aligned_for_line.append({
-                            "word": raw_w,
-                            "start": w_start,
-                            "end": max(w_start + 0.030, w_end),
-                            "char_spans": char_spans,
-                        })
-
-        # Fallback if alignment failed for this line
-        if len(aligned_for_line) < len(line_words_raw):
-            aligned_for_line = []
-            dur = max(0.5, line_end - line_start)
-            step = dur / len(line_words_raw)
-            for idx, r in enumerate(line_words_raw):
-                w_s = line_start + (idx * step)
-                w_e = w_s + step
-                aligned_for_line.append({
-                    "word": r,
-                    "start": w_s,
-                    "end": w_e,
-                    "char_spans": None,
-                })
-
-        # Distribute syllables for each word in the line (Task 2)
-        n_words = len(aligned_for_line)
-        for w_idx, w_data in enumerate(aligned_for_line):
-            is_last_word = (w_idx == n_words - 1)
-            sylls = distribute_word_syllables(
-                word=w_data["word"],
-                start=w_data["start"],
-                end=w_data["end"],
-                lang=lang,
-                char_spans=w_data.get("char_spans"),
-                is_last_in_phrase=is_last_word,
-                has_pause_after=is_last_word,
-            )
-            # Tag phrase line break on the first syllable of the next line (Task 6)
-            if is_last_word:
-                sylls[-1]["line_break_after"] = True
-            final_syllables.extend(sylls)
-
-    # Audio-based onset snapping (Task 3)
-    final_syllables = snap_syllables_to_audio(
-        final_syllables,
-        vocal_audio_16k,
-        sr=sr,
+    return align_lyrics_doc_mms(
+        vocals_path=vocals_path,
+        doc=doc,
         pitch_data=pitch_data,
+        hardware_profile=hardware_profile,
     )
-
-    # Note end pruning (Task 5)
-    final_syllables = prune_note_ends(final_syllables, pitch_data=pitch_data)
-
-    return final_syllables
 
 
 def align_whisper_words(
@@ -604,111 +603,13 @@ def align_whisper_words(
     hardware_profile: Optional[HardwareProfile] = None,
 ) -> List[Dict[str, Any]]:
     """
-    Refines Whisper word timestamps via MMS CTC forced alignment:
-    - Groups Whisper words into phrases/lines (pause >= 0.6s or 8 words)
-    - Runs MMS forced alignment on each phrase window
-    - Distributes syllables via Task 2, snaps onsets via Task 3, prunes ends via Task 5.
+    Refines Whisper word timestamps via MMS CTC forced alignment.
+    Delegates to MMS CTC Trellis forced aligner in karaoke.align_mms.
     """
-    if not whisper_words:
-        return []
-
-    vocal_audio_16k, sr = load_audio_mono(vocals_path, target_sr=16000)
-    audio_dur = len(vocal_audio_16k) / sr
-
-    aligner_dev = hardware_profile.device if hardware_profile else None
-    aligner = MMSForcedAligner.get_instance(device=aligner_dev)
-    waveform_tensor = torch.from_numpy(vocal_audio_16k).unsqueeze(0)
-
-    # 1. Group Whisper words into lines/phrases (Task 6)
-    lines: List[List[Dict[str, Any]]] = []
-    current_line: List[Dict[str, Any]] = []
-
-    for i, w in enumerate(whisper_words):
-        if not current_line:
-            current_line.append(w)
-            continue
-
-        prev_w = current_line[-1]
-        pause = w["start"] - prev_w["end"]
-
-        if pause >= PAUSE_BREAK_THRESHOLD_SEC or len(current_line) >= LINE_MAX_WORDS:
-            lines.append(current_line)
-            current_line = [w]
-        else:
-            current_line.append(w)
-
-    if current_line:
-        lines.append(current_line)
-
-    final_syllables: List[Dict[str, Any]] = []
-
-    # 2. Align each phrase
-    for line in lines:
-        line_start = line[0]["start"]
-        line_end = line[-1]["end"]
-
-        win_start = max(0.0, line_start - 1.5)
-        win_end = min(audio_dur, line_end + 1.5)
-        start_samp = int(win_start * sr)
-        end_samp = int(win_end * sr)
-        chunk = waveform_tensor[:, start_samp:end_samp]
-
-        raw_words = [w["word"] for w in line]
-        cleaned_pairs = [(r, clean_word_for_mms(r)) for r in raw_words]
-        valid_pairs = [(r, c) for r, c in cleaned_pairs if len(c) > 0]
-
-        aligned_for_line = []
-        if valid_pairs:
-            mms_words = [c for r, c in valid_pairs]
-            spans, ratio = aligner.align_chunk(chunk, mms_words)
-
-            if spans and len(spans) == len(valid_pairs):
-                for (raw_w, clean_w), sp in zip(valid_pairs, spans):
-                    if sp and len(sp) > 0:
-                        w_start = win_start + (sp[0].start * ratio)
-                        w_end = win_start + (sp[-1].end * ratio)
-                        char_spans = [
-                            (ch, win_start + s.start * ratio, win_start + s.end * ratio)
-                            for ch, s in zip(clean_w, sp)
-                        ]
-                        aligned_for_line.append({
-                            "word": raw_w,
-                            "start": w_start,
-                            "end": max(w_start + 0.030, w_end),
-                            "char_spans": char_spans,
-                        })
-
-        if len(aligned_for_line) < len(line):
-            aligned_for_line = [
-                {"word": w["word"], "start": w["start"], "end": w["end"], "char_spans": None}
-                for w in line
-            ]
-
-        n_words = len(aligned_for_line)
-        for w_idx, w_data in enumerate(aligned_for_line):
-            is_last_word = (w_idx == n_words - 1)
-            sylls = distribute_word_syllables(
-                word=w_data["word"],
-                start=w_data["start"],
-                end=w_data["end"],
-                lang=lang,
-                char_spans=w_data.get("char_spans"),
-                is_last_in_phrase=is_last_word,
-                has_pause_after=is_last_word,
-            )
-            if is_last_word:
-                sylls[-1]["line_break_after"] = True
-            final_syllables.extend(sylls)
-
-    # Audio-based onset snapping (Task 3)
-    final_syllables = snap_syllables_to_audio(
-        final_syllables,
-        vocal_audio_16k,
-        sr=sr,
+    return align_whisper_words_mms(
+        vocals_path=vocals_path,
+        whisper_words=whisper_words,
         pitch_data=pitch_data,
+        lang=lang,
+        hardware_profile=hardware_profile,
     )
-
-    # Note end pruning (Task 5)
-    final_syllables = prune_note_ends(final_syllables, pitch_data=pitch_data)
-
-    return final_syllables

@@ -52,13 +52,14 @@ F0_MEDIAN_FILTER_SIZE: int = 5          # 5-frame median filter
 MIN_VOICED_RUN_FRAMES: int = 5          # Isolated voiced runs < 5 frames masked
 OCTAVE_JUMP_TOLERANCE_ST: float = 1.0   # Semitone tolerance around 12 st for jump repair
 OCTAVE_NEIGHBOR_WINDOW_FRAMES: int = 15 # ±15 frames neighbor window
-TUNING_MAX_CORRECTION_CENTS: float = 50.0 # Clamp global tuning estimate
+TUNING_MAX_CORRECTION_CENTS: float = 15.0 # Clamp global tuning estimate to +/- 15 cents max
+TUNING_MIN_CONFIDENCE: float = 0.85       # Minimum circular mode confidence to apply tuning shift
 VIBRATO_LPF_CUTOFF_HZ: float = 5.0      # Low-pass filter for vibrato suppression
 
 # Phase 5 Note Building & Melisma Split (P2 Fix)
-SPLIT_MIN_SYLLABLE_DUR_SEC: float = 0.50 # Syllable duration >= 500 ms for split
-SPLIT_MIN_PLATEAU_DUR_SEC: float = 0.15  # Both plateaus >= 150 ms
-SPLIT_MIN_SEMITONE_DIFF: float = 2.0     # Plateau medians differ by >= 2 st (not 1)
+SPLIT_MIN_SYLLABLE_DUR_SEC: float = 0.70 # Syllable duration >= 700 ms for split (unless explicit tilde/hyphen)
+SPLIT_MIN_PLATEAU_DUR_SEC: float = 0.25  # Both plateaus >= 250 ms (up from 150 ms)
+SPLIT_MIN_SEMITONE_DIFF: float = 2.5     # Plateau medians differ by >= 2.5 st (not 2.0)
 SPLIT_MAX_PLATEAU_STD_ST: float = 0.6    # Each plateau std-dev < 0.6 st
 SPLIT_TILDE_MIN_SEMITONE_DIFF: float = 1.0 # If tilde marker present, >= 1 st
 MIN_CORE_VOICED_FRAMES: int = 3          # Minimum voiced frames in core region

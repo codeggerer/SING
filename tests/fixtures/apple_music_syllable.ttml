@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<tt xmlns="http://www.w3.org/ns/ttml" xmlns:itunes="http://music.apple.com/lyric-ttml" xmlns:ttm="http://www.w3.org/ns/ttml#metadata">
+  <head>
+    <metadata>
+      <ttm:title>Hello World</ttm:title>
+      <ttm:agent type="person" xml:id="v1">Test Artist</ttm:agent>
+    </metadata>
+  </head>
+  <body>
+    <div>
+      <p begin="00:00:12.340" end="00:00:16.800">
+        <span begin="00:00:12.340" end="00:00:12.800">Hel-</span>
+        <span begin="00:00:12.800" end="00:00:13.500">lo </span>
+        <span begin="00:00:13.600" end="00:00:14.400">world</span>
+      </p>
+      <p begin="00:00:17.100" end="00:00:20.500" itunes:agent="v2">
+        <span begin="00:00:17.100" end="00:00:18.500">(yeah </span>
+        <span begin="00:00:18.500" end="00:00:20.500">yeah)</span>
+      </p>
+    </div>
+  </body>
+</tt>

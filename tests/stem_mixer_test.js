@@ -70,6 +70,7 @@ class MockGainNode {
     this.gain = {
       value: 1.0,
       setValueAtTime: (v) => { this.value = v; this.gain.value = v; },
+      setTargetAtTime: (v, time, constant) => { this.value = v; this.gain.value = v; },
     };
   }
   connect(dest) { return dest; }
@@ -198,5 +199,24 @@ const sync3 = testYouTubeVideoSync(10.0, -1.5, 8.5);
 assert.strictEqual(sync3.expectedYtTime, 8.5);
 assert.strictEqual(sync3.shouldSeek, false);
 console.log('  ✓ PASS: YouTube video sync drift evaluation (150ms threshold) verified');
+
+// 8. Test Stem Event Synchronization Logic (Phase 6)
+assert.ok(js.includes("this.instAudio.addEventListener('pause'"), "Missing instAudio pause sync listener");
+assert.ok(js.includes("this.instAudio.addEventListener('waiting'"), "Missing instAudio waiting sync listener");
+assert.ok(js.includes("this.instAudio.addEventListener('playing'"), "Missing instAudio playing sync listener");
+assert.ok(js.includes("this.instAudio.addEventListener('seeking'"), "Missing instAudio seeking sync listener");
+assert.ok(js.includes("this.instAudio.addEventListener('seeked'"), "Missing instAudio seeked sync listener");
+assert.ok(js.includes("this.instAudio.addEventListener('ratechange'"), "Missing instAudio ratechange sync listener");
+console.log('  ✓ PASS: Tight lockstep media event synchronization listeners verified');
+
+// 9. Test Click-Free Volume Fading (0% to 100% smooth fade)
+assert.ok(js.includes("setTargetAtTime(v, now, rampTime)"), "Missing click-free exponential gain crossfading in StemMixer");
+assert.ok(js.includes("setTargetAtTime(1.0, now, rampTime)"), "Missing click-free instrumental gain setting");
+assert.ok(js.includes("setTargetAtTime(m, now, rampTime)"), "Missing click-free master gain setting");
+console.log('  ✓ PASS: Smooth click-free volume crossfading (setTargetAtTime) verified');
+
+// 10. Test Dual-Stem Library Badge in UI
+assert.ok(js.includes("Dual-Stem"), "Missing Dual-Stem badge indicator in renderLibraryGrid");
+console.log('  ✓ PASS: Dual-Stem visual badge present in library grid UI');
 
 console.log('🎉 ALL DUAL-STEM MIXER & YOUTUBE SYNC TESTS PASSED!');

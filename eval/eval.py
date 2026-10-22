@@ -49,6 +49,70 @@ def get_git_sha() -> str:
         return "unknown"
 
 
+def get_source_code_mtime() -> float:
+    """Return the most recent modification timestamp among core engine source files."""
+    source_files: List[Path] = []
+
+    karaoke_dir = PROJECT_ROOT / "karaoke"
+    if karaoke_dir.exists():
+        for p in karaoke_dir.rglob("*.py"):
+            if not p.name.startswith(".") and "__pycache__" not in p.parts:
+                source_files.append(p)
+
+    gk_file = PROJECT_ROOT / "generate_karaoke.py"
+    if gk_file.exists():
+        source_files.append(gk_file)
+
+    lp_dir = PROJECT_ROOT / "lyrics_providers"
+    if lp_dir.exists():
+        for p in lp_dir.rglob("*.py"):
+            if not p.name.startswith(".") and "__pycache__" not in p.parts:
+                source_files.append(p)
+
+    if not source_files:
+        return 0.0
+    return max(f.stat().st_mtime for f in source_files if f.is_file())
+
+
+def is_chart_cache_valid(
+    gen_txt_path: Path,
+    meta_path: Path,
+    mode: str,
+    pitch_engine: str,
+    separator: str,
+    use_basic_pitch: bool,
+    source_mtime: float,
+) -> bool:
+    """
+    Check if a generated chart is valid:
+    - Exists on disk
+    - File modification time >= source_mtime
+    - Companion .meta.json exists and matches mode, pitch_engine, separator, use_basic_pitch, and source_mtime >= source_mtime
+    """
+    if not gen_txt_path.exists():
+        return False
+    if gen_txt_path.stat().st_mtime < source_mtime:
+        return False
+    if not meta_path.exists():
+        return False
+    try:
+        with open(meta_path, "r", encoding="utf-8") as f:
+            meta = json.load(f)
+        if meta.get("mode") != mode:
+            return False
+        if meta.get("pitch_engine") != pitch_engine:
+            return False
+        if meta.get("separator") != separator:
+            return False
+        if meta.get("use_basic_pitch") != use_basic_pitch:
+            return False
+        if meta.get("source_mtime", 0) < source_mtime:
+            return False
+        return True
+    except Exception:
+        return False
+
+
 def run_pipeline_on_song(
     audio_path: Path,
     output_dir: Path,
@@ -57,6 +121,7 @@ def run_pipeline_on_song(
     use_basic_pitch: bool = False,
     inject_truth_chart: Optional[UltraStarChart] = None,
     lyrics_json_path: Optional[Path] = None,
+    output_txt: Optional[Path] = None,
 ) -> Path:
     """
     Run generate_karaoke.py on a song.
@@ -87,7 +152,8 @@ def run_pipeline_on_song(
         if bp_adapter.is_available:
             bp_notes = bp_adapter.predict_notes(vocals_file)
 
-    output_txt = output_dir / f"{audio_path.stem}.txt"
+    if output_txt is None:
+        output_txt = output_dir / f"{audio_path.stem}.txt"
 
     if inject_truth_chart:
         # Isolate pitch: use truth syllables and timings
@@ -184,12 +250,24 @@ def evaluate_corpus(
     force: bool = False,
     use_lyrics_doc: bool = True,
     check_regression: Optional[str] = None,
+    mode: str = "canonical",
+    anchor_octave: bool = True,
 ) -> Dict[str, Any]:
     """
     Run evaluation on selected corpus songs and report results.
     """
     corpus_dir = corpus_dir.resolve()
     results_dir.mkdir(parents=True, exist_ok=True)
+
+    # Normalize mode handling with legacy flags
+    if mode == "truth" or inject_truth_lyrics or stage == "pitch":
+        mode = "truth"
+    elif not use_lyrics_doc or mode == "whisper":
+        mode = "whisper"
+    elif mode not in ("whisper", "canonical", "truth"):
+        mode = "canonical"
+
+    source_mtime = get_source_code_mtime()
 
     # Find matching song directories
     candidate_dirs = [
@@ -215,7 +293,7 @@ def evaluate_corpus(
         return {}
 
     bp_flag = " + BasicPitch" if use_basic_pitch else ""
-    print(f"\n🎯 Running evaluation [stage: {stage}, pitch_engine: {pitch_engine}{bp_flag}, separator: {separator}] on {len(matched_dirs)} song(s)...\n")
+    print(f"\n🎯 Running evaluation [mode: {mode}, stage: {stage}, pitch_engine: {pitch_engine}{bp_flag}, separator: {separator}] on {len(matched_dirs)} song(s)...\n")
 
     results_by_song: Dict[str, Any] = {}
     table_rows: List[List[str]] = []
@@ -228,16 +306,29 @@ def evaluate_corpus(
         truth_chart = parse_ultrastar_txt(truth_path)
 
         out_gen_dir = PROJECT_ROOT / "output" / "eval" / slug
-        gen_txt_path = out_gen_dir / f"{audio_path.stem}.txt"
+        gen_txt_path = out_gen_dir / f"{audio_path.stem}_{mode}.txt"
+        meta_path = out_gen_dir / f"{audio_path.stem}_{mode}.meta.json"
+        legacy_txt_path = out_gen_dir / f"{audio_path.stem}.txt"
+
+        cache_valid = False
+        target_txt = gen_txt_path
+
+        if not force:
+            if is_chart_cache_valid(gen_txt_path, meta_path, mode, pitch_engine, separator, use_basic_pitch, source_mtime):
+                cache_valid = True
+                target_txt = gen_txt_path
+            elif mode == "canonical" and legacy_txt_path.exists() and legacy_txt_path.stat().st_mtime >= source_mtime:
+                cache_valid = True
+                target_txt = legacy_txt_path
 
         t0 = time.time()
         # Run generation if needed
-        if force or not gen_txt_path.exists() or inject_truth_lyrics or stage == "pitch":
-            print(f"▶ Generating chart for {slug}...")
-            inject_chart = truth_chart if (inject_truth_lyrics or stage == "pitch") else None
-            lyrics_json = (d / "lyrics.json") if (use_lyrics_doc and (d / "lyrics.json").exists()) else None
+        if not cache_valid:
+            print(f"▶ Generating chart for {slug} [mode: {mode}]...")
+            inject_chart = truth_chart if mode == "truth" else None
+            lyrics_json = (d / "lyrics.json") if (mode == "canonical" and (d / "lyrics.json").exists()) else None
             try:
-                gen_txt_path = run_pipeline_on_song(
+                target_txt = run_pipeline_on_song(
                     audio_path,
                     out_gen_dir,
                     pitch_engine=pitch_engine,
@@ -245,7 +336,24 @@ def evaluate_corpus(
                     use_basic_pitch=use_basic_pitch,
                     inject_truth_chart=inject_chart,
                     lyrics_json_path=lyrics_json,
+                    output_txt=gen_txt_path,
                 )
+                try:
+                    shutil.copy2(target_txt, legacy_txt_path)
+                except Exception:
+                    pass
+
+                meta_data = {
+                    "mode": mode,
+                    "pitch_engine": pitch_engine,
+                    "separator": separator,
+                    "use_basic_pitch": use_basic_pitch,
+                    "source_mtime": source_mtime,
+                    "generated_at": datetime.now().isoformat(),
+                }
+                with open(meta_path, "w", encoding="utf-8") as f:
+                    json.dump(meta_data, f, indent=2)
+
             except Exception as e:
                 print(f"  ✗ Failed to generate for {slug}: {e}")
                 continue
@@ -254,13 +362,17 @@ def evaluate_corpus(
 
         # Parse generated chart
         try:
-            gen_chart = parse_ultrastar_txt(gen_txt_path)
+            gen_chart = parse_ultrastar_txt(target_txt)
         except Exception as e:
-            print(f"  ✗ Failed to parse generated chart {gen_txt_path}: {e}")
+            print(f"  ✗ Failed to parse generated chart {target_txt}: {e}")
             continue
 
         # Evaluate metrics
-        metrics = evaluate_chart(truth_chart.notes_dict, gen_chart.notes_dict)
+        metrics = evaluate_chart(
+            truth_chart.notes_dict,
+            gen_chart.notes_dict,
+            anchor_octave=anchor_octave,
+        )
         m_dict = metrics.to_dict()
 
         results_by_song[slug] = {
@@ -350,9 +462,10 @@ def evaluate_corpus(
     full_report = {
         "timestamp": datetime.now().isoformat(),
         "git_sha": git_sha,
+        "mode": mode,
         "stage": stage,
         "pitch_engine": pitch_engine,
-        "inject_truth_lyrics": inject_truth_lyrics,
+        "inject_truth_lyrics": (mode == "truth"),
         "summary": summary,
         "songs": results_by_song,
     }
@@ -429,6 +542,12 @@ def evaluate_corpus(
 def main():
     parser = argparse.ArgumentParser(description="Evaluate AI Karaoke Engine against Ground Truth Corpus")
     parser.add_argument(
+        "--mode",
+        choices=["whisper", "canonical", "truth"],
+        default="canonical",
+        help="Evaluation mode: 'canonical' (lyrics.json), 'whisper' (pure AI fallback), 'truth' (inject truth syllables) (default: canonical)",
+    )
+    parser.add_argument(
         "--stage",
         choices=["pitch", "lyrics", "timing", "all"],
         default="all",
@@ -474,7 +593,7 @@ def main():
     parser.add_argument(
         "--inject-truth-lyrics",
         action="store_true",
-        help="Inject truth lyrics and timing when testing pitch in isolation",
+        help="Inject truth lyrics and timing when testing pitch in isolation (deprecated, use --mode truth)",
     )
     parser.add_argument(
         "--force",
@@ -484,14 +603,27 @@ def main():
     parser.add_argument(
         "--no-lyrics",
         action="store_true",
-        help="Ignore lyrics.json and force Whisper transcription",
+        help="Ignore lyrics.json and force Whisper transcription (deprecated, use --mode whisper)",
     )
     parser.add_argument(
         "--check-regression",
         default=None,
         help="Path to baseline.json to verify no metric regressed by > 2 points (exit 1 on failure)",
     )
+    parser.add_argument(
+        "--no-octave-anchor",
+        dest="anchor_octave",
+        action="store_false",
+        default=True,
+        help="Disable octave anchoring during pitch evaluation",
+    )
     args = parser.parse_args()
+
+    mode = args.mode
+    if args.no_lyrics:
+        mode = "whisper"
+    elif args.inject_truth_lyrics or args.stage == "pitch":
+        mode = "truth"
 
     evaluate_corpus(
         stage=args.stage,
@@ -502,10 +634,12 @@ def main():
         pitch_engine=args.pitch_engine,
         separator=args.separator,
         use_basic_pitch=args.use_basic_pitch,
-        inject_truth_lyrics=args.inject_truth_lyrics,
+        inject_truth_lyrics=(mode == "truth"),
         force=args.force,
-        use_lyrics_doc=not args.no_lyrics,
+        use_lyrics_doc=(mode == "canonical"),
         check_regression=args.check_regression,
+        mode=mode,
+        anchor_octave=args.anchor_octave,
     )
 
 

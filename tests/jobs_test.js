@@ -16,6 +16,7 @@ const {
   listLibrarySongs,
   serveSongFile,
   updateSongChart,
+  updateSongVideoId,
   deleteSong,
 } = require('../lib/library');
 
@@ -66,6 +67,8 @@ if (!fs.existsSync(testDir)) {
 
 fs.writeFileSync(path.join(testDir, 'song.txt'), '#TITLE:Unit Test Title\n#ARTIST:Unit Test Artist\nE\n');
 fs.writeFileSync(path.join(testDir, 'instrumental.wav'), Buffer.alloc(1024, 0));
+fs.writeFileSync(path.join(testDir, 'vocals.wav'), Buffer.alloc(512, 0));
+fs.writeFileSync(path.join(testDir, 'cover.jpg'), Buffer.alloc(256, 0));
 fs.writeFileSync(
   path.join(testDir, 'meta.json'),
   JSON.stringify({
@@ -75,6 +78,8 @@ fs.writeFileSync(
     syncType: 'syllable',
     provider: 'spicylyrics',
     qualityScore: 0.98,
+    hasVocals: true,
+    hasInstrumental: true,
     createdAt: new Date().toISOString(),
   })
 );
@@ -86,7 +91,10 @@ assert.strictEqual(found.title, 'Unit Test Title');
 assert.strictEqual(found.artist, 'Unit Test Artist');
 assert.strictEqual(found.badgeType, 'Syllable-synced');
 assert.strictEqual(found.hasInstrumental, true);
-console.log('  ✓ PASS: listLibrarySongs');
+assert.strictEqual(found.hasVocals, true);
+assert.strictEqual(found.instrumentalUrl, `/songs/${testSlug}/instrumental.wav`);
+assert.strictEqual(found.vocalsUrl, `/songs/${testSlug}/vocals.wav`);
+console.log('  ✓ PASS: listLibrarySongs (Dual-stem verified: instrumental.wav + vocals.wav)');
 
 // 5. HTTP Range Serving & Path Traversal Prevention
 let statusCode = 0;
@@ -125,7 +133,21 @@ assert.strictEqual(statusCode, 206, 'Range request should return 206 Partial Con
 assert.strictEqual(headers['Content-Range'], 'bytes 0-15/1024');
 assert.strictEqual(headers['Content-Length'], 16);
 assert.strictEqual(headers['Accept-Ranges'], 'bytes');
-console.log('  ✓ PASS: serveSongFile HTTP 206 Range streaming');
+assert.strictEqual(headers['Access-Control-Allow-Origin'], '*');
+assert.ok(headers['Access-Control-Expose-Headers'].includes('Content-Range'));
+console.log('  ✓ PASS: serveSongFile HTTP 206 Range streaming & CORS headers');
+
+// 5c. HEAD Request Test
+const mockHeadReq = {
+  method: 'HEAD',
+  headers: {},
+};
+serveSongFile(mockHeadReq, mockRes, `/songs/${testSlug}/vocals.wav`);
+assert.strictEqual(statusCode, 200, 'HEAD request should return 200 without piping');
+assert.strictEqual(headers['Content-Length'], 512);
+assert.strictEqual(headers['Accept-Ranges'], 'bytes');
+assert.strictEqual(headers['Access-Control-Allow-Origin'], '*');
+console.log('  ✓ PASS: serveSongFile HEAD request pre-check');
 
 // 6. Chart Editor Update (Phase 7.1)
 const updatedChart = '#TITLE:Updated Test Song\n#ARTIST:Test Artist\n#BPM:1500\n#GAP:0\n: 0 10 65 Hel-\n: 10 10 67 lo\nE';
@@ -142,7 +164,19 @@ const updatedFound = updatedSongs.find((s) => s.slug === testSlug);
 assert.ok(updatedFound && updatedFound.edited === true, 'Library list should reflect edited status');
 console.log('  ✓ PASS: updateSongChart persists changes and marks meta.json.edited = true');
 
-// 7. Delete Song from Library & Disk
+// 7. Deadlink Recovery & Video ID Update (Phase 1.2)
+assert.throws(() => updateSongVideoId('../escape', 'newVid12345'), /Invalid song slug format/);
+assert.throws(() => updateSongVideoId(testSlug, 'invalid_id'), /Invalid YouTube video ID format/);
+const vidUpdateRes = updateSongVideoId(testSlug, 'newVid12345');
+assert.strictEqual(vidUpdateRes.success, true);
+assert.strictEqual(vidUpdateRes.videoId, 'newVid12345');
+const metaAfterVid = JSON.parse(fs.readFileSync(path.join(testDir, 'meta.json'), 'utf8'));
+assert.strictEqual(metaAfterVid.youtubeId, 'newVid12345');
+assert.strictEqual(metaAfterVid.verifiedAlternativeVideo, true);
+assert.strictEqual(typeof metaAfterVid.lastVideoUpdateAt, 'string');
+console.log('  ✓ PASS: updateSongVideoId updates meta.json and marks verifiedAlternativeVideo = true');
+
+// 8. Delete Song from Library & Disk
 assert.throws(() => deleteSong('../escape'), /Invalid song slug format/);
 assert.throws(() => deleteSong('non-existent-slug-xyz'), /Song directory not found/);
 const deleteResult = deleteSong(testSlug);

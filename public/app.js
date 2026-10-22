@@ -52,6 +52,8 @@ const DEFAULT_SETTINGS = {
   theaterMode: false,            // Full-width highway (hides left video deck)
   stageLayout: 'backdrop',       // Stage layout mode ('split' | 'backdrop' | 'theater')
   backdropHighwayHeight: '100',  // Height of transparent highway box in backdrop mode ('25' | '33' | '50' | '100')
+  highwayBackdropOpacity: 65,    // Darkness opacity for highway backdrop (15-95%)
+  playheadColor: 'cyan',         // Playhead laser color ('cyan' | 'gold' | 'emerald' | 'white' | 'magenta')
 
   // Audio & Mixing
   guideVocalsVolume: 35,         // Loudness percentage for original vocals (0-100)
@@ -141,6 +143,7 @@ const state = {
 
   // Phase 6 In-Browser Generator & Library State
   resolvedTrack: null,
+  customLyricsText: null, // Phase 5 Manual Lyrics Override
   activeJobId: null,
   activeJobSse: null,
   activeJobPollTimer: null,
@@ -348,6 +351,15 @@ function applySettings(newSettings, shouldSave = true) {
   if (rowBackdropHeight) {
     rowBackdropHeight.style.display = (layout === 'backdrop') ? 'flex' : 'none';
   }
+
+  const opacityVal = typeof s.highwayBackdropOpacity === 'number' ? s.highwayBackdropOpacity : 65;
+  document.documentElement.style.setProperty('--highway-backdrop-opacity', (opacityVal / 100).toFixed(2));
+  document.documentElement.style.setProperty('--highway-backdrop-blur', '8px');
+  setVal('sliderHighwayOpacity', opacityVal);
+  setText('lblHighwayOpacityVal', `${opacityVal}%`);
+
+  const playheadCol = s.playheadColor || 'cyan';
+  setVal('selectPlayheadColor', playheadCol);
 
   setVal('sliderGuideVocalsVol', s.guideVocalsVolume);
   setText('lblGuideVocalsVol', s.guideVocalsVolume);
@@ -699,6 +711,21 @@ function bindUIEvents() {
     });
   }
 
+  const sliderHighwayOpacity = document.getElementById('sliderHighwayOpacity');
+  if (sliderHighwayOpacity) {
+    sliderHighwayOpacity.addEventListener('input', (e) => {
+      const val = parseInt(e.target.value, 10);
+      applySettings({ highwayBackdropOpacity: val });
+    });
+  }
+
+  const selPlayheadColor = document.getElementById('selectPlayheadColor');
+  if (selPlayheadColor) {
+    selPlayheadColor.addEventListener('change', (e) => {
+      applySettings({ playheadColor: e.target.value });
+    });
+  }
+
   // Tab 2: Audio & Stems
   const sliderGuide = document.getElementById('sliderGuideVocalsVol');
   if (sliderGuide) {
@@ -808,12 +835,83 @@ function bindUIEvents() {
     btnDismissPreview.addEventListener('click', () => {
       document.getElementById('resolvePreviewCard').classList.add('hidden');
       state.resolvedTrack = null;
+      state.customLyricsText = null;
+      document.getElementById('badgeCustomLyricsActive')?.classList.add('hidden');
+    });
+  }
+
+  // Phase 5: Manual Lyrics Override Modal Wiring
+  const btnOpenPasteLyrics = document.getElementById('btnOpenPasteLyrics');
+  const modalPasteLyrics = document.getElementById('modalPasteLyrics');
+  const textareaPasteLyrics = document.getElementById('textareaPasteLyrics');
+  const btnClosePasteLyrics = document.getElementById('btnClosePasteLyrics');
+  const btnClearCustomLyrics = document.getElementById('btnClearCustomLyrics');
+  const btnSaveCustomLyrics = document.getElementById('btnSaveCustomLyrics');
+  const badgeCustomLyrics = document.getElementById('badgeCustomLyricsActive');
+
+  function closePasteLyricsModal() {
+    if (modalPasteLyrics) modalPasteLyrics.classList.add('hidden');
+  }
+
+  if (btnOpenPasteLyrics && modalPasteLyrics) {
+    btnOpenPasteLyrics.addEventListener('click', () => {
+      if (textareaPasteLyrics) {
+        textareaPasteLyrics.value = state.customLyricsText || '';
+      }
+      modalPasteLyrics.classList.remove('hidden');
+      if (textareaPasteLyrics) {
+        setTimeout(() => textareaPasteLyrics.focus(), 50);
+      }
+    });
+  }
+
+  if (btnClosePasteLyrics) {
+    btnClosePasteLyrics.addEventListener('click', closePasteLyricsModal);
+  }
+
+  if (modalPasteLyrics) {
+    modalPasteLyrics.addEventListener('click', (e) => {
+      if (e.target === modalPasteLyrics) closePasteLyricsModal();
+    });
+  }
+
+  if (btnClearCustomLyrics) {
+    btnClearCustomLyrics.addEventListener('click', () => {
+      if (textareaPasteLyrics) textareaPasteLyrics.value = '';
+      state.customLyricsText = null;
+      if (badgeCustomLyrics) badgeCustomLyrics.classList.add('hidden');
+      updateStartBtnLabel();
+      closePasteLyricsModal();
+      showToast('Eigener Songtext zurückgesetzt', 'info');
+    });
+  }
+
+  if (btnSaveCustomLyrics) {
+    btnSaveCustomLyrics.addEventListener('click', () => {
+      const val = textareaPasteLyrics ? textareaPasteLyrics.value.trim() : '';
+      if (val) {
+        state.customLyricsText = val;
+        if (badgeCustomLyrics) badgeCustomLyrics.classList.remove('hidden');
+        const lines = val.split('\n').filter((l) => l.trim().length > 0);
+        showToast(`Songtext übernommen (${lines.length} Zeilen)!`, 'success');
+      } else {
+        state.customLyricsText = null;
+        if (badgeCustomLyrics) badgeCustomLyrics.classList.add('hidden');
+        showToast('Eigener Songtext entfernt', 'info');
+      }
+      updateStartBtnLabel();
+      closePasteLyricsModal();
     });
   }
 
   const btnStartGeneration = document.getElementById('btnStartGeneration');
   if (btnStartGeneration) {
     btnStartGeneration.addEventListener('click', () => handleStartSongAction());
+  }
+
+  const btnUpgradeLyrics = document.getElementById('btnUpgradeLyrics');
+  if (btnUpgradeLyrics) {
+    btnUpgradeLyrics.addEventListener('click', () => handleStartSongAction({ upgradeLyrics: true }));
   }
 
   const btnCancelGeneration = document.getElementById('btnCancelGeneration');
@@ -917,6 +1015,46 @@ function bindUIEvents() {
       showToast(`Layout: ${names[next]}`, 'info', 1800);
     });
   }
+
+  const btnToggleFullscreen = document.getElementById('btnToggleFullscreen');
+  if (btnToggleFullscreen) {
+    btnToggleFullscreen.addEventListener('click', toggleFullscreen);
+  }
+  const btnTopFullscreen = document.getElementById('btnTopFullscreen');
+  if (btnTopFullscreen) {
+    btnTopFullscreen.addEventListener('click', toggleFullscreen);
+  }
+
+  const handleFsChange = () => {
+    const fsEl = document.fullscreenElement || document.webkitFullscreenElement || document.mozFullScreenElement || document.msFullscreenElement;
+    const isFs = Boolean(fsEl);
+    const stageView = document.getElementById('viewStage');
+    if (stageView) stageView.classList.toggle('is-fullscreen', isFs);
+    if (btnToggleFullscreen) {
+      btnToggleFullscreen.textContent = isFs ? '⤡' : '⛶';
+      btnToggleFullscreen.title = isFs ? 'Exit Fullscreen (F)' : 'Toggle Fullscreen (F)';
+    }
+    if (btnTopFullscreen) {
+      btnTopFullscreen.textContent = isFs ? '⤡ Exit Fullscreen' : '⛶ Fullscreen';
+    }
+    window.dispatchEvent(new Event('resize'));
+  };
+
+  ['fullscreenchange', 'webkitfullscreenchange', 'mozfullscreenchange', 'MSFullscreenChange'].forEach((evt) => {
+    document.addEventListener(evt, handleFsChange);
+  });
+
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'f' || e.key === 'F') {
+      const activeTag = document.activeElement ? document.activeElement.tagName.toLowerCase() : '';
+      if (activeTag === 'input' || activeTag === 'textarea' || activeTag === 'select') return;
+      const stageActive = document.getElementById('viewStage')?.classList.contains('active');
+      if (stageActive) {
+        e.preventDefault();
+        toggleFullscreen();
+      }
+    }
+  });
 
   if (localStorage.getItem('sing_theater_mode') === '1') {
     toggleTheaterMode(true);
@@ -1029,6 +1167,30 @@ function toggleTheaterMode(forceState, updateSettings = true) {
   if (!arena) return;
   const isTheater = forceState !== undefined ? forceState : !arena.classList.contains('theater-mode');
   setStageLayout(isTheater ? 'theater' : 'split', updateSettings);
+}
+
+function toggleFullscreen() {
+  const stageView = document.getElementById('viewStage');
+  if (!stageView) return;
+
+  const fsEl = document.fullscreenElement || document.webkitFullscreenElement || document.mozFullScreenElement || document.msFullscreenElement;
+  const isFs = Boolean(fsEl) || stageView.classList.contains('is-fullscreen');
+  if (!isFs) {
+    const req = stageView.requestFullscreen || stageView.webkitRequestFullscreen || stageView.mozRequestFullScreen || stageView.msRequestFullscreen;
+    if (req) {
+      req.call(stageView).catch(() => {
+        stageView.classList.toggle('is-fullscreen');
+      });
+    } else {
+      stageView.classList.toggle('is-fullscreen');
+    }
+  } else {
+    const exit = document.exitFullscreen || document.webkitExitFullscreen || document.mozCancelFullScreen || document.msExitFullscreen;
+    if (fsEl && exit) {
+      exit.call(document).catch(() => {});
+    }
+    stageView.classList.remove('is-fullscreen');
+  }
 }
 
 /**
@@ -1852,8 +2014,16 @@ async function applyParsedUltraStarChart(txtContent, songMeta = {}) {
   activateDuetTrack(0);
 
   // Calculate studio sync offset by comparing UltraStar lyric lines with synced studio lyrics
-  state.calculatedStudioOffset = null;
-  if (songMeta.syncedLyrics && parsed.tracks[0]?.lines?.length > 0) {
+  if (typeof songMeta.studioOffsetSec === 'number' && songMeta.studioOffsetSec !== 0) {
+    state.calculatedStudioOffset = songMeta.studioOffsetSec;
+    setVideoOffset(songMeta.studioOffsetSec);
+  } else if (typeof songMeta.videoOffsetSec === 'number' && songMeta.videoOffsetSec !== 0) {
+    state.calculatedStudioOffset = songMeta.videoOffsetSec;
+    setVideoOffset(songMeta.videoOffsetSec);
+  } else {
+    state.calculatedStudioOffset = null;
+  }
+  if (state.calculatedStudioOffset === null && songMeta.syncedLyrics && parsed.tracks[0]?.lines?.length > 0) {
     state.calculatedStudioOffset = calculateUltraStarStudioOffset(parsed.tracks[0].lines, songMeta.syncedLyrics);
   }
 
@@ -2366,11 +2536,20 @@ async function findAndLoadYouTubeVideo(song, originalTxtVideoId = '') {
     });
 
     const first = candidates[0];
-    if (first.isOriginalGap) {
+    const isMatchingSongVideo = (
+      first.isOriginalGap ||
+      (originalTxtVideoId && first.videoId === originalTxtVideoId) ||
+      (song.videoId && first.videoId === song.videoId) ||
+      (song.youtubeId && first.videoId === song.youtubeId) ||
+      Boolean(song.instrumentalUrl)
+    );
+
+    if (isMatchingSongVideo) {
       setVideoOffset(0);
-      document.getElementById('btnUseOriginalGap').classList.add('active-sync-mode');
-      document.getElementById('btnUseStudioSync').classList.remove('active-sync-mode');
-      document.getElementById('badgeSyncInfo').textContent = '✓ Original Video GAP active';
+      document.getElementById('btnUseOriginalGap')?.classList.add('active-sync-mode');
+      document.getElementById('btnUseStudioSync')?.classList.remove('active-sync-mode');
+      const badgeSync = document.getElementById('badgeSyncInfo');
+      if (badgeSync) badgeSync.textContent = '✓ Original Video GAP active';
     } else {
       applyStudioSyncOffset();
     }
@@ -2476,40 +2655,122 @@ function loadYouTubeVideoById(videoId) {
   });
 }
 
-function handleYouTubeEmbedFallback(errorCode) {
-  // 1. Try next available video candidate in state.ytVideoList (e.g. lyric or audio version)
-  if (state.ytCurrentIndex + 1 < state.ytVideoList.length) {
-    state.ytCurrentIndex++;
-    const nextVid = state.ytVideoList[state.ytCurrentIndex];
-    const selectEl = document.getElementById('selectYtVideo');
-    if (selectEl) selectEl.value = nextVid.videoId;
-
-    const isLyricOrAudio = /lyric|audio/i.test(nextVid.title || '');
-    showToast(
-      isLyricOrAudio
-        ? 'Video restricted by label – Switching to lyric video.'
-        : 'Video restricted by label – Trying alternate version.',
-      'warning',
-      4000
-    );
-
-    const badgeSync = document.getElementById('badgeSyncInfo');
-    if (badgeSync) {
-      badgeSync.textContent = '↻ Video restricted – Switching to Lyric/Audio version';
-    }
-    if (nextVid.isOriginalGap) {
-      setVideoOffset(0);
-      document.getElementById('btnUseOriginalGap')?.classList.add('active-sync-mode');
-      document.getElementById('btnUseStudioSync')?.classList.remove('active-sync-mode');
-    } else {
-      applyStudioSyncOffset();
-    }
-    loadYouTubeVideoById(nextVid.videoId);
-    return;
+async function handleYouTubeEmbedFallback(errorCode) {
+  state.failedVideoIds = state.failedVideoIds || new Set();
+  const currentVid = state.ytVideoList?.[state.ytCurrentIndex]?.videoId || state.currentSong?.youtubeId;
+  if (currentVid) {
+    state.failedVideoIds.add(currentVid);
   }
 
-  // 2. Check if local audio stems exist in currentSong or active stemMixer / localAudio
+  // 1. Try next untried video candidate in state.ytVideoList (e.g. lyric or audio version)
+  while (state.ytCurrentIndex + 1 < state.ytVideoList.length) {
+    state.ytCurrentIndex++;
+    const nextVid = state.ytVideoList[state.ytCurrentIndex];
+    if (nextVid && nextVid.videoId && !state.failedVideoIds.has(nextVid.videoId)) {
+      const selectEl = document.getElementById('selectYtVideo');
+      if (selectEl) selectEl.value = nextVid.videoId;
+
+      const isLyricOrAudio = /lyric|audio/i.test(nextVid.title || '');
+      showToast(
+        isLyricOrAudio
+          ? 'Video restricted by label – Switching to lyric video.'
+          : 'Video restricted by label – Trying alternate version.',
+        'warning',
+        4000
+      );
+
+      const badgeSync = document.getElementById('badgeSyncInfo');
+      if (badgeSync) {
+        badgeSync.textContent = '↻ Video restricted – Switching to Lyric/Audio version';
+      }
+      if (nextVid.isOriginalGap) {
+        setVideoOffset(0);
+        document.getElementById('btnUseOriginalGap')?.classList.add('active-sync-mode');
+        document.getElementById('btnUseStudioSync')?.classList.remove('active-sync-mode');
+      } else {
+        applyStudioSyncOffset();
+      }
+      loadYouTubeVideoById(nextVid.videoId);
+      return;
+    }
+  }
+
+  // 2. Deadlink Auto-Recovery (Phase 1.2):
+  // When Error 150 (embedding restricted), 101, or 100 triggers and list is exhausted,
+  // query /api/youtube?q=${artist}+${title}+Official+Audio with duration matching (+- 5s)
   const song = state.currentSong;
+  const artist = song?.artist || song?.artistName || '';
+  const title = song?.title || song?.trackName || '';
+  const durationSec = song?.durationSec || song?.duration || 0;
+
+  if ((artist || title) && !state._isRecoveringDeadlink) {
+    state._isRecoveringDeadlink = true;
+    showToast(`Video restricted (Error ${errorCode}) – Auto-recovering official audio stream...`, 'warning', 4500);
+    const badgeSync = document.getElementById('badgeSyncInfo');
+    if (badgeSync) {
+      badgeSync.textContent = '↻ Auto-recovering stream...';
+    }
+
+    try {
+      const q = `${artist} ${title} Official Audio`.trim();
+      const res = await fetch(`/api/youtube?q=${encodeURIComponent(q)}&duration=${encodeURIComponent(durationSec)}`);
+      if (res.ok) {
+        const data = await res.json();
+        const videos = Array.isArray(data.videos) ? data.videos : [];
+        const untried = videos.filter((v) => v && v.videoId && !state.failedVideoIds.has(v.videoId));
+
+        if (untried.length > 0) {
+          // Duration matching: tolerance +- 5 seconds
+          const durationMatched = durationSec > 0
+            ? untried.filter((v) => Math.abs((v.durationSec || 0) - durationSec) <= 5)
+            : untried;
+
+          const chosen = durationMatched.length > 0 ? durationMatched[0] : untried[0];
+
+          // Append to state.ytVideoList
+          state.ytVideoList.push({
+            videoId: chosen.videoId,
+            title: chosen.title,
+            channel: chosen.channel,
+            durationText: chosen.durationText,
+            isOriginalGap: false,
+          });
+          state.ytCurrentIndex = state.ytVideoList.length - 1;
+
+          // Update select dropdown
+          const selectEl = document.getElementById('selectYtVideo');
+          if (selectEl) {
+            const opt = document.createElement('option');
+            opt.value = chosen.videoId;
+            opt.textContent = `★ ${chosen.title} (${chosen.durationText || 'recovered'})`;
+            selectEl.appendChild(opt);
+            selectEl.value = chosen.videoId;
+          }
+
+          // If song is a saved library track, persist to meta.json
+          if (song?.slug) {
+            fetch(`/api/library/${encodeURIComponent(song.slug)}/video`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ videoId: chosen.videoId }),
+            }).catch((err) => console.warn('Failed to update meta.json videoId:', err));
+            song.youtubeId = chosen.videoId;
+          }
+
+          showToast(`Recovered alternative stream: ${chosen.title}`, 'success', 4000);
+          state._isRecoveringDeadlink = false;
+          loadYouTubeVideoById(chosen.videoId);
+          return;
+        }
+      }
+    } catch (recErr) {
+      console.warn('Deadlink auto-recovery failed:', recErr);
+    } finally {
+      state._isRecoveringDeadlink = false;
+    }
+  }
+
+  // 3. Check if local audio stems exist in currentSong or active stemMixer / localAudio
   const hasLocalStems = Boolean(
     (state.playbackSource === 'local' && (state.stemMixer?.hasInstrumental || state.localAudio)) ||
     (song && (song.instrumentalUrl || song.audioUrl))
@@ -2525,7 +2786,7 @@ function handleYouTubeEmbedFallback(errorCode) {
     return;
   }
 
-  // 3. Fallback when neither alternative video nor local stems exist
+  // 4. Fallback when neither alternative video nor local stems exist
   const overlay = document.getElementById('ytOverlayStatus');
   if (overlay) {
     overlay.textContent = 'This video blocks embedding. Please choose another version or paste an alternative link.';
@@ -2617,10 +2878,48 @@ class StemMixer {
 
     this.instAudio.addEventListener('ended', () => {
       state.isPlaying = false;
+      this.pause();
       if (state.ytPlayer && typeof state.ytPlayer.pauseVideo === 'function') {
         try {
           state.ytPlayer.pauseVideo();
         } catch (_) {}
+      }
+    });
+
+    this.instAudio.addEventListener('pause', () => {
+      if (this.hasVocals) {
+        try { this.vocalAudio.pause(); } catch (_) {}
+      }
+    });
+
+    this.instAudio.addEventListener('waiting', () => {
+      if (this.hasVocals) {
+        try { this.vocalAudio.pause(); } catch (_) {}
+      }
+    });
+
+    this.instAudio.addEventListener('playing', () => {
+      if (this.hasVocals && this.vocalAudio.paused && !this.instAudio.paused) {
+        this.vocalAudio.currentTime = this.instAudio.currentTime;
+        this.vocalAudio.play().catch(() => {});
+      }
+    });
+
+    this.instAudio.addEventListener('seeking', () => {
+      if (this.hasVocals) {
+        try { this.vocalAudio.currentTime = this.instAudio.currentTime; } catch (_) {}
+      }
+    });
+
+    this.instAudio.addEventListener('seeked', () => {
+      if (this.hasVocals) {
+        try { this.vocalAudio.currentTime = this.instAudio.currentTime; } catch (_) {}
+      }
+    });
+
+    this.instAudio.addEventListener('ratechange', () => {
+      if (this.hasVocals) {
+        try { this.vocalAudio.playbackRate = this.instAudio.playbackRate; } catch (_) {}
       }
     });
 
@@ -2718,24 +3017,43 @@ class StemMixer {
     const now = this.ctx.currentTime;
     const v = this.hasVocals ? (this.guideVocalPercent / 100) : 0;
     const m = (this.masterVolumePercent / 100);
+    const rampTime = 0.02; // 20ms click-free crossfade constant
 
     if (this.vocalGain && this.vocalGain.gain) {
       try {
-        this.vocalGain.gain.setValueAtTime(v, now);
+        if (typeof this.vocalGain.gain.setTargetAtTime === 'function') {
+          this.vocalGain.gain.setTargetAtTime(v, now, rampTime);
+        } else if (typeof this.vocalGain.gain.setValueAtTime === 'function') {
+          this.vocalGain.gain.setValueAtTime(v, now);
+        } else {
+          this.vocalGain.gain.value = v;
+        }
       } catch (_) {
         this.vocalGain.gain.value = v;
       }
     }
     if (this.instGain && this.instGain.gain) {
       try {
-        this.instGain.gain.setValueAtTime(1.0, now);
+        if (typeof this.instGain.gain.setTargetAtTime === 'function') {
+          this.instGain.gain.setTargetAtTime(1.0, now, rampTime);
+        } else if (typeof this.instGain.gain.setValueAtTime === 'function') {
+          this.instGain.gain.setValueAtTime(1.0, now);
+        } else {
+          this.instGain.gain.value = 1.0;
+        }
       } catch (_) {
         this.instGain.gain.value = 1.0;
       }
     }
     if (this.masterGain && this.masterGain.gain) {
       try {
-        this.masterGain.gain.setValueAtTime(m, now);
+        if (typeof this.masterGain.gain.setTargetAtTime === 'function') {
+          this.masterGain.gain.setTargetAtTime(m, now, rampTime);
+        } else if (typeof this.masterGain.gain.setValueAtTime === 'function') {
+          this.masterGain.gain.setValueAtTime(m, now);
+        } else {
+          this.masterGain.gain.value = m;
+        }
       } catch (_) {
         this.masterGain.gain.value = m;
       }
@@ -2743,9 +3061,14 @@ class StemMixer {
   }
 
   syncDrift() {
-    if (this.hasVocals && !this.instAudio.paused && !this.vocalAudio.paused) {
+    if (this.hasVocals && !this.instAudio.paused) {
+      if (this.vocalAudio.paused) {
+        this.vocalAudio.currentTime = this.instAudio.currentTime;
+        this.vocalAudio.play().catch(() => {});
+        return;
+      }
       const diff = Math.abs(this.vocalAudio.currentTime - this.instAudio.currentTime);
-      if (diff > 0.018) {
+      if (diff > 0.035) {
         this.vocalAudio.currentTime = this.instAudio.currentTime;
       }
     }
@@ -2802,6 +3125,12 @@ function updateGuideVocalsUI(hasVocals) {
 
 function setupLocalStemsAudio(instrumentalUrl, vocalsUrl = null) {
   state.playbackSource = 'local';
+  setVideoOffset(0); // Exact studio alignment: chart beats generated directly from local stems
+  const badgeSync = document.getElementById('badgeSyncInfo');
+  if (badgeSync) badgeSync.textContent = '✓ Studio Audio (Zero Offset)';
+  document.getElementById('btnUseOriginalGap')?.classList.add('active-sync-mode');
+  document.getElementById('btnUseStudioSync')?.classList.remove('active-sync-mode');
+
   const mixer = ensureStemMixer();
 
   if (mixer) {
@@ -4104,6 +4433,67 @@ function initCalibrationWizard() {
       return;
     }
 
+    // 0. Chart Editor Controls (Phase 8)
+    if (typeof editorState !== 'undefined' && editorState.isOpen) {
+      if (e.code === 'Space' || e.key === ' ') {
+        e.preventDefault();
+        toggleEditorAudioPreview();
+        return;
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        closeChartEditor();
+        return;
+      }
+      if (e.key === 'Delete' || e.key === 'Backspace') {
+        e.preventDefault();
+        deleteSelectedNote();
+        return;
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        if (e.shiftKey) {
+          shiftAllNotesPitch(1);
+        } else {
+          shiftSelectedNotePitch(1);
+        }
+        return;
+      }
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        if (e.shiftKey) {
+          shiftAllNotesPitch(-1);
+        } else {
+          shiftSelectedNotePitch(-1);
+        }
+        return;
+      }
+      if (e.key === 'ArrowLeft') {
+        e.preventDefault();
+        if (e.shiftKey) {
+          shiftAllNotesTiming(-0.10);
+        } else if (editorState.selectedNoteIndex >= 0) {
+          nudgeSelectedNoteTiming(-0.05, -0.05);
+        } else {
+          editorState.scrollTime = Math.max(0, editorState.scrollTime - 0.5);
+          renderChartEditorCanvas();
+        }
+        return;
+      }
+      if (e.key === 'ArrowRight') {
+        e.preventDefault();
+        if (e.shiftKey) {
+          shiftAllNotesTiming(0.10);
+        } else if (editorState.selectedNoteIndex >= 0) {
+          nudgeSelectedNoteTiming(0.05, 0.05);
+        } else {
+          editorState.scrollTime += 0.5;
+          renderChartEditorCanvas();
+        }
+        return;
+      }
+    }
+
     // 1. Stage Live Latency Quick-Nudge: '[' (-10 ms) and ']' (+10 ms)
     if (e.key === '[') {
       e.preventDefault();
@@ -4681,13 +5071,52 @@ function renderPitchHighwayCanvas(songTime, evalTime) {
     }
   }
 
-  // 4. Playhead Line
-  ctx.strokeStyle = 'rgba(255, 45, 108, 0.85)';
-  ctx.lineWidth = 2.5;
+  // 4. Playhead Line & Cursor (Customizable Vibe & High Visibility)
+  const playheadVibe = state.settings.playheadColor || 'cyan';
+  let playheadStroke = 'rgba(0, 240, 255, 0.95)';
+  let playheadGlow = '#00f0ff';
+  let playheadCap = '#ffffff';
+
+  if (playheadVibe === 'gold') {
+    playheadStroke = 'rgba(255, 184, 0, 0.95)';
+    playheadGlow = '#ffb800';
+  } else if (playheadVibe === 'emerald') {
+    playheadStroke = 'rgba(0, 230, 118, 0.95)';
+    playheadGlow = '#00e676';
+  } else if (playheadVibe === 'white') {
+    playheadStroke = 'rgba(255, 255, 255, 0.98)';
+    playheadGlow = '#38bdf8';
+  } else if (playheadVibe === 'magenta') {
+    playheadStroke = 'rgba(255, 45, 108, 0.95)';
+    playheadGlow = '#ff2d6c';
+  }
+
+  ctx.save();
+  ctx.shadowColor = playheadGlow;
+  ctx.shadowBlur = 10;
+  ctx.strokeStyle = playheadStroke;
+  ctx.lineWidth = 3.2;
   ctx.beginPath();
   ctx.moveTo(playheadX, topPadding);
   ctx.lineTo(playheadX, H - bottomPadding);
   ctx.stroke();
+
+  // Top and bottom glowing laser pointers
+  ctx.fillStyle = playheadCap;
+  ctx.shadowBlur = 12;
+  const drawDiamond = (cx, cy, r) => {
+    ctx.beginPath();
+    ctx.moveTo(cx, cy - r);
+    ctx.lineTo(cx + r, cy);
+    ctx.lineTo(cx, cy + r);
+    ctx.lineTo(cx - r, cy);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+  };
+  drawDiamond(playheadX, topPadding + 2, 5.5);
+  drawDiamond(playheadX, H - bottomPadding - 2, 5.5);
+  ctx.restore();
 
   // 5. Stabilized Pitch Trail
   if (state.settings.showLiveVoiceOrb && state.pitchHistory.length > 1) {
@@ -4703,7 +5132,7 @@ function renderPitchHighwayCanvas(songTime, evalTime) {
       if (p1.songTime - p0.songTime > 0.12) continue;
       if (Math.abs(p1.midi - p0.midi) > 6.5) continue;
 
-      ctx.strokeStyle = p1.hit ? '#00e676' : '#ff2d6c';
+      ctx.strokeStyle = p1.hit ? '#00e676' : 'rgba(244, 63, 94, 0.65)';
       ctx.beginPath();
       ctx.moveTo(timeToX(p0.songTime), midiToY(p0.midi));
       ctx.lineTo(timeToX(p1.songTime), midiToY(p1.midi));
@@ -4716,7 +5145,7 @@ function renderPitchHighwayCanvas(songTime, evalTime) {
     const rawOrbY = midiToY(state.lastDisplayedMidi);
     const orbY = Math.max(topPadding - 4, Math.min(H - bottomPadding + 4, rawOrbY));
     ctx.save();
-    ctx.shadowColor = '#00f0ff';
+    ctx.shadowColor = playheadGlow;
     ctx.shadowBlur = 16;
     ctx.fillStyle = '#ffffff';
     ctx.beginPath();
@@ -4993,6 +5422,9 @@ function renderLibraryGrid(songs) {
       const durText = s.durationSec ? formatSec(s.durationSec) : '--:--';
       const scorePct = Math.round((s.qualityScore || 0.8) * 100);
       const editedBadge = s.edited ? '<span class="badge badge-gold" title="Edited in Chart Editor">Edited</span>' : '';
+      const stemBadge = (s.hasVocals && s.hasInstrumental)
+        ? '<span class="badge badge-sync" title="Dual-Stem: Isolated backing track + Lead vocal guide">Dual-Stem</span>'
+        : (s.hasInstrumental ? '<span class="badge" title="Isolated instrumental backing track">Instrumental</span>' : '');
 
       return `
       <div class="song-card library-card" data-lib-idx="${idx}">
@@ -5000,6 +5432,7 @@ function renderLibraryGrid(songs) {
         <div class="card-body">
           <div class="card-badges">
             <span class="badge ${badgeClass}">${escapeHtml(s.badgeLabel || 'AI Song')}</span>
+            ${stemBadge}
             <span class="badge">${durText}</span>
             <span class="badge badge-gold">${scorePct}% Sync</span>
             ${editedBadge}
@@ -5110,7 +5543,11 @@ function renderLibraryGrid(songs) {
 
 async function playLibrarySong(song) {
   resetScoreState();
-  setVideoOffset(0);
+  const initialOffset = (typeof song.studioOffsetSec === 'number' && song.studioOffsetSec !== 0)
+    ? song.studioOffsetSec
+    : ((typeof song.videoOffsetSec === 'number' && song.videoOffsetSec !== 0) ? song.videoOffsetSec : 0);
+  setVideoOffset(initialOffset);
+  state.calculatedStudioOffset = initialOffset;
   document.getElementById('viewLobby').classList.remove('active');
   document.getElementById('viewStage').classList.add('active');
 
@@ -5135,6 +5572,8 @@ async function playLibrarySong(song) {
       instrumentalUrl: song.instrumentalUrl,
       vocalsUrl: song.vocalsUrl,
       artworkUrl: song.coverUrl,
+      studioOffsetSec: song.studioOffsetSec,
+      videoOffsetSec: song.videoOffsetSec,
     };
 
     await applyParsedUltraStarChart(txtContent, songMeta);
@@ -5304,10 +5743,22 @@ function displayResolvePreview(resolved) {
 
   const sourceBadge = document.getElementById('previewSourceBadge');
   if (sourceBadge) {
-    if (resolved.type === 'spotify') sourceBadge.textContent = 'Spotify';
-    else if (resolved.type === 'youtube') sourceBadge.textContent = 'YouTube';
-    else if (resolved.type === 'upload') sourceBadge.textContent = 'Upload';
-    else sourceBadge.textContent = 'Search';
+    if (resolved.usdbMatch && resolved.usdbMatch.matched) {
+      sourceBadge.textContent = 'USDB Ground Truth';
+      sourceBadge.className = 'badge badge-gold';
+    } else if (resolved.type === 'spotify') {
+      sourceBadge.textContent = 'Spotify';
+      sourceBadge.className = 'badge badge-green';
+    } else if (resolved.type === 'youtube') {
+      sourceBadge.textContent = 'YouTube';
+      sourceBadge.className = 'badge badge-red';
+    } else if (resolved.type === 'upload') {
+      sourceBadge.textContent = 'Upload';
+      sourceBadge.className = 'badge badge-cyan';
+    } else {
+      sourceBadge.textContent = 'Search';
+      sourceBadge.className = 'badge';
+    }
   }
 
   const durBadge = document.getElementById('previewDurationBadge');
@@ -5323,7 +5774,9 @@ function displayResolvePreview(resolved) {
 
   const noteEl = document.getElementById('previewMetaNote');
   if (noteEl) {
-    if (resolved.youtubeId) {
+    if (resolved.usdbMatch && resolved.usdbMatch.matched) {
+      noteEl.textContent = `★ USDB community chart verified (${resolved.usdbMatch.id}) – 0.0ms timing error, human-verified pitch`;
+    } else if (resolved.youtubeId) {
       noteEl.textContent = `✓ YouTube audio matched (${resolved.youtubeId})`;
     } else if (resolved.uploadedAudioPath) {
       noteEl.textContent = '✓ Local audio file uploaded';
@@ -5332,13 +5785,130 @@ function displayResolvePreview(resolved) {
     }
   }
 
-  const startBtn = document.getElementById('btnStartGeneration');
-  if (startBtn) {
-    const isCatalog = findCatalogMatch(resolved);
-    startBtn.textContent = isCatalog ? 'Sing Now' : 'Generate Karaoke';
+  const badgeCustomLyrics = document.getElementById('badgeCustomLyricsActive');
+  if (badgeCustomLyrics) {
+    badgeCustomLyrics.classList.toggle('hidden', !state.customLyricsText);
   }
 
+  // Lyrics Tier Badge Evaluation (Phase 5.2: Tier 1 vs Tier 2 vs Tier 3 vs Tier 4)
+  const tierBadge = document.getElementById('previewLyricsTierBadge');
+  const btnUpgradeLyrics = document.getElementById('btnUpgradeLyrics');
+  if (btnUpgradeLyrics) {
+    btnUpgradeLyrics.classList.add('hidden');
+    btnUpgradeLyrics.style.display = 'none';
+  }
+
+  // Check if track is cached in library as Tier 4
+  const cachedLibSong = state.librarySongs && state.librarySongs.find(
+    (s) =>
+      (s.slug && s.slug === resolved.slug) ||
+      (s.youtubeId && resolved.youtubeId && s.youtubeId === resolved.youtubeId) ||
+      (s.title && s.artist && s.title.toLowerCase() === resolved.title?.toLowerCase() && s.artist.toLowerCase() === resolved.artist?.toLowerCase())
+  );
+  const isCachedAsTier4 = !!(
+    cachedLibSong &&
+    (cachedLibSong.lyricsTier === 4 ||
+     cachedLibSong.badgeType === 'Whisper-AI' ||
+     cachedLibSong.provider === 'whisper')
+  );
+
+  const surfaceUpgradeIfTier4 = () => {
+    if (isCachedAsTier4 && btnUpgradeLyrics) {
+      btnUpgradeLyrics.classList.remove('hidden');
+      btnUpgradeLyrics.style.display = 'inline-flex';
+    }
+  };
+
+  if (tierBadge) {
+    if ((resolved.usdbMatch && resolved.usdbMatch.matched) || findCatalogMatch(resolved)) {
+      tierBadge.textContent = '★ Tier 1: USDB Ground Truth (100% Timing & Pitch)';
+      tierBadge.className = 'badge badge-gold';
+      tierBadge.style.display = 'inline-block';
+      surfaceUpgradeIfTier4();
+    } else if (state.customLyricsText && state.customLyricsText.trim()) {
+      const lines = state.customLyricsText.trim().split('\n').filter(Boolean).length;
+      tierBadge.textContent = `✓ Tier 3: Web Lyrics (Manual, ${lines}Z)`;
+      tierBadge.className = 'badge badge-cyan';
+      tierBadge.style.display = 'inline-block';
+      surfaceUpgradeIfTier4();
+    } else {
+      tierBadge.textContent = '🔍 Lyrics suchen...';
+      tierBadge.className = 'badge';
+      tierBadge.style.display = 'inline-block';
+
+      // Check Tier 2 (Studio Syllable-Sync) and Tier 3 (Web Lyrics Harvest)
+      const currentTrackSlug = resolved.slug;
+
+      // Probe /api/lyrics for Tier 2 Studio Syllable-Sync
+      fetch('/api/lyrics', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          title: resolved.title,
+          artist: resolved.artist,
+          durationSec: resolved.durationSec || 0,
+          spotifyTrackId: resolved.spotifyTrackId || '',
+        }),
+      })
+        .then((r) => (r.ok ? r.json() : null))
+        .then((lyricsDoc) => {
+          if (!state.resolvedTrack || state.resolvedTrack.slug !== currentTrackSlug) return;
+          if (lyricsDoc && (lyricsDoc.syncType === 'syllable' || (lyricsDoc.lines && lyricsDoc.lines.some((l) => Array.isArray(l.syllables) && l.syllables.length > 0)))) {
+            tierBadge.textContent = '✓ Tier 2: Studio Syllable-Sync';
+            tierBadge.className = 'badge badge-green';
+            surfaceUpgradeIfTier4();
+            return;
+          }
+
+          // Probe /api/lyrics/harvest for Tier 3 Web Lyrics
+          return fetch('/api/lyrics/harvest', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              artist: resolved.artist,
+              title: resolved.title,
+              youtubeId: resolved.youtubeId,
+              candidates: resolved.candidates || [],
+              durationSec: resolved.durationSec || 0,
+            }),
+          })
+            .then((r) => (r.ok ? r.json() : null))
+            .then((data) => {
+              if (!state.resolvedTrack || state.resolvedTrack.slug !== currentTrackSlug) return;
+              if (data && data.lyrics) {
+                const srcLabel = data.source === 'youtube_description' ? 'YouTube' : data.source;
+                tierBadge.textContent = `✓ Tier 3: Web Lyrics (${srcLabel}, ${data.lineCount}Z)`;
+                tierBadge.className = 'badge badge-cyan';
+                surfaceUpgradeIfTier4();
+              } else {
+                tierBadge.textContent = '⚡ Tier 4: Whisper AI Speech-to-Text';
+                tierBadge.className = 'badge badge-pink';
+              }
+            });
+        })
+        .catch(() => {
+          if (state.resolvedTrack && state.resolvedTrack.slug !== currentTrackSlug) {
+            tierBadge.textContent = '⚡ Tier 4: Whisper AI Speech-to-Text';
+            tierBadge.className = 'badge badge-pink';
+          }
+        });
+    }
+  }
+
+  updateStartBtnLabel();
+
   previewCard.classList.remove('hidden');
+}
+
+function updateStartBtnLabel() {
+  const startBtn = document.getElementById('btnStartGeneration');
+  if (!startBtn || !state.resolvedTrack) return;
+  const hasCustomLyrics = !!(state.customLyricsText && state.customLyricsText.trim());
+  const isCatalog =
+    !hasCustomLyrics &&
+    (findCatalogMatch(state.resolvedTrack) ||
+      (state.resolvedTrack.usdbMatch && state.resolvedTrack.usdbMatch.matched));
+  startBtn.textContent = isCatalog ? 'Sing Now (Instant)' : 'Generate Karaoke';
 }
 
 function findCatalogMatch(resolved) {
@@ -5385,7 +5955,7 @@ function findCatalogMatch(resolved) {
   );
 }
 
-async function handleStartSongAction() {
+async function handleStartSongAction(actionOptions = {}) {
   if (!state.resolvedTrack) {
     showToast('Please enter or select a song first', 'warning');
     return;
@@ -5424,70 +5994,74 @@ async function handleStartSongAction() {
     status: 'running',
     stage: 'lyrics',
     progress: 5,
-    message: 'Loading lyrics and track data...',
+    message: actionOptions.upgradeLyrics
+      ? 'Upgrading song to studio-quality lyrics...'
+      : 'Loading lyrics and track data...',
   });
 
-  // 1. Check if song exists in curated UltraStar catalog (e.g. Wir sind Helden - Von Hier An Blind!)
-  const catMatch = findCatalogMatch(state.resolvedTrack);
-  if (catMatch) {
+  // 1. Check if song exists in curated UltraStar catalog or USDB ground truth (MASTER_OVERHAUL_PLAN Phase 1)
+  const hasCustomLyrics = !!(state.customLyricsText && state.customLyricsText.trim());
+  const isUpgrade = !!actionOptions.upgradeLyrics;
+  const catMatch = !hasCustomLyrics && !isUpgrade ? findCatalogMatch(state.resolvedTrack) : null;
+  const usdbM = !hasCustomLyrics && !isUpgrade ? state.resolvedTrack.usdbMatch : null;
+  if (catMatch || (usdbM && usdbM.matched)) {
+    const matchId = catMatch?.id || usdbM?.id || usdbM?.usdbId;
+    const matchTitle = catMatch?.title || usdbM?.title || state.resolvedTrack.title;
+    const matchArtist = catMatch?.artist || usdbM?.artist || state.resolvedTrack.artist;
+    const matchVideo = state.resolvedTrack.youtubeId || catMatch?.video || usdbM?.videoId || '';
+
     state.lastGeneratedSong = {
       isDirectSession: true,
-      trackName: catMatch.title,
-      artistName: catMatch.artist,
-      duration: catMatch.duration || state.resolvedTrack.durationSec || 210,
-      videoId: state.resolvedTrack.youtubeId || catMatch.video,
+      trackName: matchTitle,
+      artistName: matchArtist,
+      duration: catMatch?.duration || state.resolvedTrack.durationSec || 210,
+      videoId: matchVideo,
       isUltraStar: true,
-      ultraStarId: catMatch.id,
+      isUsdb: !!usdbM?.usdbId,
+      usdbId: usdbM?.usdbId || null,
+      ultraStarId: matchId,
       artworkUrl:
         state.resolvedTrack.artworkUrl ||
-        `https://img.youtube.com/vi/${state.resolvedTrack.youtubeId}/hqdefault.jpg`,
+        (matchVideo ? `https://img.youtube.com/vi/${matchVideo}/hqdefault.jpg` : ''),
     };
 
-    // Animate through all 5 steps smoothly
-    await new Promise((r) => setTimeout(r, 350));
+    // Animate through all steps smoothly without spawning heavy AI worker
+    await new Promise((r) => setTimeout(r, 200));
     updateGenerationUI({
       status: 'running',
       stage: 'lyrics',
-      progress: 20,
-      message: 'Loading lyrics and UltraStar notes...',
+      progress: 25,
+      message: 'Ingesting verified USDB ground-truth notes (0.0ms timing error)...',
     });
 
-    await new Promise((r) => setTimeout(r, 400));
+    await new Promise((r) => setTimeout(r, 200));
     updateGenerationUI({
       status: 'running',
       stage: 'download',
-      progress: 45,
-      message: 'Connecting YouTube audio stream...',
+      progress: 55,
+      message: 'Connecting YouTube audio stream & video inset...',
     });
 
-    await new Promise((r) => setTimeout(r, 400));
+    await new Promise((r) => setTimeout(r, 200));
     updateGenerationUI({
       status: 'running',
       stage: 'separate',
-      progress: 70,
-      message: 'Processing audio stems & timing...',
+      progress: 80,
+      message: 'Configuring duet vocal tracks & pitch intervals...',
     });
 
-    await new Promise((r) => setTimeout(r, 400));
-    updateGenerationUI({
-      status: 'running',
-      stage: 'pitch',
-      progress: 90,
-      message: 'Calibrating pitch & note intervals...',
-    });
-
-    await new Promise((r) => setTimeout(r, 400));
+    await new Promise((r) => setTimeout(r, 200));
     updateGenerationUI({
       status: 'done',
       stage: 'done',
       progress: 100,
-      message: 'Ready to sing! Click the button below.',
+      message: 'Ready to sing! 100% human-verified pitch & timing.',
     });
     return;
   }
 
   // 2. Check if already in local library
-  if (state.librarySongs && state.librarySongs.length > 0) {
+  if (!hasCustomLyrics && !isUpgrade && state.librarySongs && state.librarySongs.length > 0) {
     const libMatch = state.librarySongs.find(
       (s) =>
         (s.youtubeId && s.youtubeId === state.resolvedTrack.youtubeId) ||
@@ -5505,9 +6079,11 @@ async function handleStartSongAction() {
     }
   }
 
-  // 3. Otherwise generate via AI job queue or fallback to direct stage
-  await startGenerationJob();
+  // 3. Otherwise generate via AI job queue or fallback to direct stage (or upgrade)
+  await startGenerationJob(actionOptions);
 }
+
+const startSongFromPreview = handleStartSongAction;
 
 async function startGenerationJob(overrideOptions = {}) {
   if (!state.resolvedTrack) {
@@ -5527,6 +6103,7 @@ async function startGenerationJob(overrideOptions = {}) {
     forceWhisper,
     allowWhisperFallback: true,
     uploadedAudioPath: state.resolvedTrack.uploadedAudioPath || null,
+    rawLyricsText: state.customLyricsText || null,
     ...overrideOptions,
   };
 
@@ -5551,7 +6128,9 @@ async function startGenerationJob(overrideOptions = {}) {
     status: 'running',
     stage: 'lyrics',
     progress: 15,
-    message: 'Analyzing lyrics and audio structure...',
+    message: state.customLyricsText
+      ? 'Manual plain lyrics loaded! Preparing precision alignment...'
+      : 'Analyzing lyrics and audio structure...',
   });
 
   try {
@@ -5945,7 +6524,179 @@ const editorState = {
   previewAudio: null,
   isPlayingPreview: false,
   previewTimer: null,
+  waveformPeaks: null,
+  waveformDuration: 0,
+  waveformSampleRate: 50,
+  isGuideToneEnabled: true,
 };
+
+let editorAudioCtx = null;
+let editorGuideOsc = null;
+let editorGuideGain = null;
+
+function startEditorGuideTone() {
+  stopEditorGuideTone();
+  if (!editorState.isGuideToneEnabled) return;
+  try {
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContextClass) return;
+    if (!editorAudioCtx || editorAudioCtx.state === 'closed') {
+      editorAudioCtx = new AudioContextClass();
+    }
+    if (editorAudioCtx.state === 'suspended') {
+      editorAudioCtx.resume();
+    }
+
+    editorGuideOsc = editorAudioCtx.createOscillator();
+    editorGuideGain = editorAudioCtx.createGain();
+
+    editorGuideOsc.type = 'triangle';
+    editorGuideGain.gain.setValueAtTime(0.0001, editorAudioCtx.currentTime);
+
+    editorGuideOsc.connect(editorGuideGain);
+    editorGuideGain.connect(editorAudioCtx.destination);
+    editorGuideOsc.start();
+  } catch (err) {
+    console.warn('Could not initialize guide tone oscillator:', err);
+  }
+}
+
+function updateEditorGuideTone(currentTime) {
+  if (!editorGuideOsc || !editorGuideGain || !editorAudioCtx || !editorState.isGuideToneEnabled) return;
+
+  const activeNote = editorState.notes.find((n) => currentTime >= n.startTime && currentTime <= n.endTime);
+  const now = editorAudioCtx.currentTime;
+
+  if (activeNote) {
+    const freq = 440 * Math.pow(2, (activeNote.midi - 69) / 12);
+    editorGuideOsc.frequency.setTargetAtTime(freq, now, 0.012);
+    editorGuideGain.gain.setTargetAtTime(0.20, now, 0.02);
+  } else {
+    editorGuideGain.gain.setTargetAtTime(0.0001, now, 0.02);
+  }
+}
+
+function stopEditorGuideTone() {
+  if (editorGuideGain && editorAudioCtx) {
+    try {
+      editorGuideGain.gain.setTargetAtTime(0.0001, editorAudioCtx.currentTime, 0.01);
+    } catch (_) {}
+  }
+  if (editorGuideOsc) {
+    try {
+      editorGuideOsc.stop(editorAudioCtx.currentTime + 0.05);
+      editorGuideOsc.disconnect();
+    } catch (_) {}
+    editorGuideOsc = null;
+  }
+}
+
+function playSinglePitchTone(midi, durationSec = 0.14) {
+  try {
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContextClass) return;
+    const ctx = new AudioContextClass();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    const freq = 440 * Math.pow(2, (midi - 69) / 12);
+    osc.type = 'triangle';
+    osc.frequency.setValueAtTime(freq, ctx.currentTime);
+    gain.gain.setValueAtTime(0.18, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + durationSec);
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start();
+    osc.stop(ctx.currentTime + durationSec + 0.02);
+    setTimeout(() => {
+      try { ctx.close(); } catch (_) {}
+    }, (durationSec + 0.1) * 1000);
+  } catch (_) {}
+}
+
+function toggleEditorGuideTone() {
+  editorState.isGuideToneEnabled = !editorState.isGuideToneEnabled;
+  const btn = document.getElementById('btnEditorGuideTone');
+  if (btn) {
+    if (editorState.isGuideToneEnabled) {
+      btn.classList.add('active');
+      btn.textContent = '🔔 Tone ON';
+      btn.title = 'Synthetic guide tone is enabled';
+    } else {
+      btn.classList.remove('active');
+      btn.textContent = '🔕 Tone OFF';
+      btn.title = 'Synthetic guide tone is muted';
+    }
+  }
+  if (!editorState.isGuideToneEnabled) {
+    stopEditorGuideTone();
+  } else if (editorState.isPlayingPreview && editorState.previewAudio) {
+    startEditorGuideTone();
+  }
+}
+
+async function loadEditorWaveform(audioUrl) {
+  if (!audioUrl) return;
+  try {
+    const statusEl = document.getElementById('editorStatusText');
+    if (statusEl) statusEl.textContent = 'Loading vocal waveform...';
+
+    const res = await fetch(audioUrl);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const arrayBuffer = await res.arrayBuffer();
+
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContextClass) return;
+    const tempCtx = new AudioContextClass();
+    const audioBuffer = await tempCtx.decodeAudioData(arrayBuffer);
+
+    const sampleRate = audioBuffer.sampleRate;
+    const duration = audioBuffer.duration;
+    const bucketRate = 50; // 50 samples/sec (20ms resolution)
+    const totalBuckets = Math.ceil(duration * bucketRate);
+    const peaks = new Float32Array(totalBuckets);
+    const channelData = audioBuffer.getChannelData(0);
+    const samplesPerBucket = Math.floor(sampleRate / bucketRate);
+
+    for (let b = 0; b < totalBuckets; b++) {
+      const startSample = b * samplesPerBucket;
+      const endSample = Math.min(channelData.length, startSample + samplesPerBucket);
+      let maxVal = 0;
+      for (let s = startSample; s < endSample; s += 4) {
+        const v = Math.abs(channelData[s]);
+        if (v > maxVal) maxVal = v;
+      }
+      peaks[b] = maxVal;
+    }
+
+    let globalMax = 0;
+    for (let i = 0; i < peaks.length; i++) {
+      if (peaks[i] > globalMax) globalMax = peaks[i];
+    }
+    if (globalMax > 0.001) {
+      for (let i = 0; i < peaks.length; i++) {
+        peaks[i] = peaks[i] / globalMax;
+      }
+    }
+
+    editorState.waveformPeaks = peaks;
+    editorState.waveformDuration = duration;
+    editorState.waveformSampleRate = bucketRate;
+
+    if (statusEl && editorState.isOpen) {
+      statusEl.textContent = 'Vocal waveform loaded. Click a note to select, or press Spacebar to preview.';
+    }
+    if (editorState.isOpen) {
+      renderChartEditorCanvas();
+    }
+    try { tempCtx.close(); } catch (_) {}
+  } catch (err) {
+    console.warn('Could not load vocal waveform:', err);
+    const statusEl = document.getElementById('editorStatusText');
+    if (statusEl && editorState.isOpen) {
+      statusEl.textContent = 'Click a note to select, or press Spacebar to preview.';
+    }
+  }
+}
 
 function initChartEditor() {
   const modal = document.getElementById('modalChartEditor');
@@ -5986,6 +6737,23 @@ function initChartEditor() {
 
   const btnNudgeEndRight = document.getElementById('btnNudgeEndRight');
   if (btnNudgeEndRight) btnNudgeEndRight.addEventListener('click', () => nudgeSelectedNoteTiming(0, 0.05));
+
+  // Shift All Notes Buttons (Phase 8)
+  const btnShiftAllTimeEarlier = document.getElementById('btnShiftAllTimeEarlier');
+  if (btnShiftAllTimeEarlier) btnShiftAllTimeEarlier.addEventListener('click', () => shiftAllNotesTiming(-0.10));
+
+  const btnShiftAllTimeLater = document.getElementById('btnShiftAllTimeLater');
+  if (btnShiftAllTimeLater) btnShiftAllTimeLater.addEventListener('click', () => shiftAllNotesTiming(0.10));
+
+  const btnShiftAllPitchDown = document.getElementById('btnShiftAllPitchDown');
+  if (btnShiftAllPitchDown) btnShiftAllPitchDown.addEventListener('click', () => shiftAllNotesPitch(-1));
+
+  const btnShiftAllPitchUp = document.getElementById('btnShiftAllPitchUp');
+  if (btnShiftAllPitchUp) btnShiftAllPitchUp.addEventListener('click', () => shiftAllNotesPitch(1));
+
+  // Guide Tone Toggle Button (Phase 8)
+  const btnGuideTone = document.getElementById('btnEditorGuideTone');
+  if (btnGuideTone) btnGuideTone.addEventListener('click', toggleEditorGuideTone);
 
   // Note Text Input
   const inputText = document.getElementById('inputEditorSyllableText');
@@ -6123,6 +6891,14 @@ function openChartEditor(songMeta, initialNotes) {
 
   updateSelectedNoteUI();
 
+  // Load vocal waveform in background (Phase 8)
+  editorState.waveformPeaks = null;
+  editorState.waveformDuration = 0;
+  const vocalAudioUrl = songMeta.vocalsUrl || songMeta.instrumentalUrl || null;
+  if (vocalAudioUrl) {
+    loadEditorWaveform(vocalAudioUrl);
+  }
+
   const modal = document.getElementById('modalChartEditor');
   if (modal) modal.classList.remove('hidden');
 
@@ -6139,6 +6915,7 @@ function closeChartEditor() {
       editorState.previewAudio.pause();
     } catch (_) {}
   }
+  stopEditorGuideTone();
   editorState.isPlayingPreview = false;
   if (editorState.previewTimer) {
     clearInterval(editorState.previewTimer);
@@ -6213,7 +6990,32 @@ function renderChartEditorCanvas() {
     ctx.fillText(`${midiToNoteName(m)} (${m})`, leftMargin - 6, y + laneHeight * 0.75);
   }
 
-  // 2. Vertical Time Grid Lines
+  // 2. Vocal Waveform Overlay (Phase 8: Background of notes)
+  if (editorState.waveformPeaks && editorState.waveformPeaks.length > 0) {
+    const peaks = editorState.waveformPeaks;
+    const bucketRate = editorState.waveformSampleRate || 50;
+    const centerY = topMargin + usableH / 2;
+    const maxWaveHeight = usableH * 0.42;
+
+    ctx.save();
+    ctx.fillStyle = 'rgba(0, 242, 254, 0.14)';
+    const stepPx = 2;
+    for (let px = leftMargin; px < W; px += stepPx) {
+      const timeAtPx = editorState.scrollTime + ((px - leftMargin) / timeW) * editorState.viewportDuration;
+      if (timeAtPx < 0 || timeAtPx > editorState.waveformDuration) continue;
+      const bucketIdx = Math.floor(timeAtPx * bucketRate);
+      if (bucketIdx >= 0 && bucketIdx < peaks.length) {
+        const amp = peaks[bucketIdx];
+        if (amp > 0.02) {
+          const barH = Math.max(2, amp * maxWaveHeight);
+          ctx.fillRect(px, centerY - barH, stepPx, barH * 2);
+        }
+      }
+    }
+    ctx.restore();
+  }
+
+  // 3. Vertical Time Grid Lines
   const startTimeSec = Math.floor(editorState.scrollTime);
   const endTimeSec = Math.ceil(editorState.scrollTime + editorState.viewportDuration);
 
@@ -6236,7 +7038,7 @@ function renderChartEditorCanvas() {
     ctx.fillText(`${s.toFixed(0)}s`, x, H - 10);
   }
 
-  // 3. Render Note Blocks
+  // 4. Render Note Blocks
   const visualGap = 2;
 
   for (let i = 0; i < editorState.notes.length; i++) {
@@ -6272,8 +7074,12 @@ function renderChartEditorCanvas() {
     ctx.fill();
     ctx.stroke();
 
+    // Selected Note Handle Bars on borders (Phase 8: drag resize affordance)
     if (isSelected) {
-      ctx.fillStyle = '#fff';
+      ctx.fillStyle = '#00f2fe';
+      // Left border handle
+      ctx.fillRect(x1, y, 4, drawH);
+      // Right border handle
       ctx.fillRect(x1 + drawW - 4, y, 4, drawH);
     }
 
@@ -6281,10 +7087,10 @@ function renderChartEditorCanvas() {
     ctx.font = 'bold 11px sans-serif';
     ctx.textAlign = 'left';
     const textLabel = note.text ? `${note.text.trim()} [${note.midi}]` : `[${note.midi}]`;
-    ctx.fillText(textLabel, x1 + 4, y + drawH * 0.72);
+    ctx.fillText(textLabel, x1 + 6, y + drawH * 0.72);
   }
 
-  // 4. Playhead
+  // 5. Playhead
   if (editorState.isPlayingPreview && editorState.previewAudio) {
     const curTime = editorState.previewAudio.currentTime;
     const curX = timeToX(curTime);
@@ -6322,6 +7128,7 @@ function onEditorCanvasMouseDown(e) {
 
   let clickedNoteIdx = -1;
   let clickedMode = 'move';
+  const borderThresholdPx = 10;
 
   for (let i = editorState.notes.length - 1; i >= 0; i--) {
     const n = editorState.notes[i];
@@ -6329,9 +7136,11 @@ function onEditorCanvasMouseDown(e) {
     const nx2 = timeToX(n.endTime);
     const ny = midiToY(n.midi);
 
-    if (mx >= nx1 && mx <= nx2 && my >= ny && my <= ny + laneHeight) {
+    if (mx >= nx1 - 4 && mx <= nx2 + 4 && my >= ny && my <= ny + laneHeight) {
       clickedNoteIdx = i;
-      if (mx >= nx2 - 8) {
+      if (mx <= nx1 + borderThresholdPx) {
+        clickedMode = 'resize-start';
+      } else if (mx >= nx2 - borderThresholdPx) {
         clickedMode = 'resize-end';
       } else {
         clickedMode = 'move';
@@ -6345,6 +7154,7 @@ function onEditorCanvasMouseDown(e) {
     editorState.isDragging = true;
     editorState.dragMode = clickedMode;
     editorState.dragInitialNote = { ...editorState.notes[clickedNoteIdx] };
+    playSinglePitchTone(editorState.notes[clickedNoteIdx].midi, 0.12);
   } else {
     editorState.isDragging = true;
     editorState.dragMode = 'pan';
@@ -6355,10 +7165,9 @@ function onEditorCanvasMouseDown(e) {
 }
 
 function onEditorCanvasMouseMove(e) {
-  if (!editorState.isDragging || !editorState.isOpen) return;
-
   const canvas = document.getElementById('editorCanvas');
-  if (!canvas) return;
+  if (!canvas || !editorState.isOpen) return;
+
   const rect = canvas.getBoundingClientRect();
   const mx = e.clientX - rect.left;
   const my = e.clientY - rect.top;
@@ -6369,6 +7178,37 @@ function onEditorCanvasMouseMove(e) {
   const bottomMargin = 28;
   const usableH = canvas.height - topMargin - bottomMargin;
   const laneHeight = usableH / Math.max(1, editorState.maxMidi - editorState.minMidi + 1);
+
+  const midiToY = (m) => topMargin + (editorState.maxMidi - m) * laneHeight;
+  const timeToX = (t) => leftMargin + ((t - editorState.scrollTime) / editorState.viewportDuration) * timeW;
+
+  if (!editorState.isDragging) {
+    // Dynamic hover cursor feedback
+    let hoverCursor = 'crosshair';
+    const borderThresholdPx = 10;
+    for (let i = editorState.notes.length - 1; i >= 0; i--) {
+      const n = editorState.notes[i];
+      const nx1 = timeToX(n.startTime);
+      const nx2 = timeToX(n.endTime);
+      const ny = midiToY(n.midi);
+
+      if (mx >= nx1 - 4 && mx <= nx2 + 4 && my >= ny && my <= ny + laneHeight) {
+        if (mx <= nx1 + borderThresholdPx || mx >= nx2 - borderThresholdPx) {
+          hoverCursor = 'ew-resize';
+        } else {
+          hoverCursor = 'grab';
+        }
+        break;
+      }
+    }
+    canvas.style.cursor = hoverCursor;
+    return;
+  }
+
+  // Active dragging cursor
+  canvas.style.cursor = (editorState.dragMode === 'resize-start' || editorState.dragMode === 'resize-end')
+    ? 'ew-resize'
+    : 'grabbing';
 
   const deltaX = mx - editorState.dragStartX;
   const deltaY = my - editorState.dragStartY;
@@ -6383,10 +7223,14 @@ function onEditorCanvasMouseMove(e) {
   if (editorState.selectedNoteIndex < 0 || !editorState.dragInitialNote) return;
   const curNote = editorState.notes[editorState.selectedNoteIndex];
 
-  if (editorState.dragMode === 'resize-end') {
+  if (editorState.dragMode === 'resize-start') {
+    const newStart = Math.min(editorState.dragInitialNote.endTime - 0.03, Math.max(0, editorState.dragInitialNote.startTime + deltaSec));
+    curNote.startTime = Math.round(newStart * 100) / 100;
+    curNote.duration = Math.round((curNote.endTime - curNote.startTime) * 100) / 100;
+  } else if (editorState.dragMode === 'resize-end') {
     const newEnd = Math.max(curNote.startTime + 0.03, editorState.dragInitialNote.endTime + deltaSec);
     curNote.endTime = Math.round(newEnd * 100) / 100;
-    curNote.duration = curNote.endTime - curNote.startTime;
+    curNote.duration = Math.round((curNote.endTime - curNote.startTime) * 100) / 100;
   } else if (editorState.dragMode === 'move') {
     const dur = editorState.dragInitialNote.endTime - editorState.dragInitialNote.startTime;
     const newStart = Math.max(0, editorState.dragInitialNote.startTime + deltaSec);
@@ -6395,7 +7239,10 @@ function onEditorCanvasMouseMove(e) {
 
     const semitoneDelta = Math.round(-deltaY / laneHeight);
     const newMidi = Math.max(24, Math.min(108, editorState.dragInitialNote.midi + semitoneDelta));
-    curNote.midi = newMidi;
+    if (newMidi !== curNote.midi) {
+      curNote.midi = newMidi;
+      playSinglePitchTone(newMidi, 0.08);
+    }
   }
 
   updateSelectedNoteUI();
@@ -6431,6 +7278,7 @@ function shiftSelectedNotePitch(delta) {
   if (note.midi < editorState.minMidi + 2) editorState.minMidi = Math.max(24, note.midi - 3);
   if (note.midi > editorState.maxMidi - 2) editorState.maxMidi = Math.min(108, note.midi + 3);
 
+  playSinglePitchTone(note.midi, 0.15);
   updateSelectedNoteUI();
   renderChartEditorCanvas();
 }
@@ -6450,9 +7298,50 @@ function nudgeSelectedNoteTiming(deltaStart, deltaEnd) {
     note.endTime = Math.max(note.startTime + 0.03, Math.round((note.endTime + deltaEnd) * 100) / 100);
   }
 
-  note.duration = note.endTime - note.startTime;
+  note.duration = Math.round((note.endTime - note.startTime) * 100) / 100;
   updateSelectedNoteUI();
   renderChartEditorCanvas();
+}
+
+function shiftAllNotesTiming(deltaSec) {
+  if (!editorState.notes || editorState.notes.length === 0) return;
+  const minStart = Math.min(...editorState.notes.map((n) => n.startTime));
+  let safeDelta = deltaSec;
+  if (minStart + deltaSec < 0) {
+    safeDelta = -minStart;
+  }
+  if (Math.abs(safeDelta) < 0.0001) {
+    showToast('Cannot shift notes earlier than 0.00s', 'warning');
+    return;
+  }
+  for (const n of editorState.notes) {
+    n.startTime = Math.max(0, Math.round((n.startTime + safeDelta) * 1000) / 1000);
+    n.endTime = Math.max(n.startTime + 0.03, Math.round((n.endTime + safeDelta) * 1000) / 1000);
+    n.duration = Math.round((n.endTime - n.startTime) * 1000) / 1000;
+  }
+  updateSelectedNoteUI();
+  renderChartEditorCanvas();
+  const sign = safeDelta > 0 ? '+' : '';
+  showToast(`Shifted all notes by ${sign}${(safeDelta * 1000).toFixed(0)} ms`, 'info', 1500);
+}
+
+function shiftAllNotesPitch(semitones) {
+  if (!editorState.notes || editorState.notes.length === 0) return;
+  for (const n of editorState.notes) {
+    n.midi = Math.max(24, Math.min(108, n.midi + semitones));
+  }
+  const pitches = editorState.notes.map((n) => n.midi).filter((m) => !isNaN(m) && m > 0);
+  if (pitches.length > 0) {
+    editorState.minMidi = Math.max(24, Math.min(...pitches) - 4);
+    editorState.maxMidi = Math.min(108, Math.max(...pitches) + 4);
+  }
+  if (editorState.selectedNoteIndex >= 0 && editorState.notes[editorState.selectedNoteIndex]) {
+    playSinglePitchTone(editorState.notes[editorState.selectedNoteIndex].midi, 0.15);
+  }
+  updateSelectedNoteUI();
+  renderChartEditorCanvas();
+  const sign = semitones > 0 ? '+' : '';
+  showToast(`Transposed all notes by ${sign}${semitones} semitone(s)`, 'info', 1500);
 }
 
 function splitSelectedNote() {
@@ -6523,16 +7412,19 @@ function updateSelectedNoteUI() {
 function toggleEditorAudioPreview() {
   const btn = document.getElementById('btnEditorPlayPause');
   const instUrl = editorState.songMeta?.instrumentalUrl || (state.currentSong?.instrumentalUrl || null);
+  const vocalUrl = editorState.songMeta?.vocalsUrl || (state.currentSong?.vocalsUrl || null);
+  const audioUrl = instUrl || vocalUrl;
 
-  if (!instUrl) {
-    showToast('No instrumental audio file available for preview.', 'warning');
+  if (!audioUrl) {
+    showToast('No audio file available for preview.', 'warning');
     return;
   }
 
   if (editorState.isPlayingPreview && editorState.previewAudio) {
     editorState.previewAudio.pause();
     editorState.isPlayingPreview = false;
-    if (btn) btn.textContent = '▶️ Play';
+    stopEditorGuideTone();
+    if (btn) btn.textContent = '▶ Play';
     if (editorState.previewTimer) {
       clearInterval(editorState.previewTimer);
       editorState.previewTimer = null;
@@ -6542,23 +7434,37 @@ function toggleEditorAudioPreview() {
   }
 
   if (!editorState.previewAudio) {
-    editorState.previewAudio = new Audio(instUrl);
+    editorState.previewAudio = new Audio(audioUrl);
+    editorState.previewAudio.addEventListener('ended', () => {
+      editorState.isPlayingPreview = false;
+      stopEditorGuideTone();
+      if (btn) btn.textContent = '▶ Play';
+      if (editorState.previewTimer) {
+        clearInterval(editorState.previewTimer);
+        editorState.previewTimer = null;
+      }
+      renderChartEditorCanvas();
+    });
   }
 
   editorState.previewAudio.currentTime = Math.max(0, editorState.scrollTime);
+  startEditorGuideTone();
+
   editorState.previewAudio.play().then(() => {
     editorState.isPlayingPreview = true;
-    if (btn) btn.textContent = '⏸️ Pause';
+    if (btn) btn.textContent = '⏸ Pause';
     editorState.previewTimer = setInterval(() => {
       if (editorState.previewAudio) {
         const cur = editorState.previewAudio.currentTime;
-        if (cur > editorState.scrollTime + editorState.viewportDuration) {
-          editorState.scrollTime = cur;
+        updateEditorGuideTone(cur);
+        if (cur > editorState.scrollTime + editorState.viewportDuration - 0.2) {
+          editorState.scrollTime = cur - 0.5;
         }
         renderChartEditorCanvas();
       }
-    }, 50);
+    }, 25);
   }).catch((err) => {
+    stopEditorGuideTone();
     showToast('Playback error: ' + err.message, 'error');
   });
 }
@@ -6629,6 +7535,16 @@ async function saveChartEditorChanges() {
         const errData = await res.json().catch(() => ({}));
         throw new Error(errData.error || `HTTP ${res.status}`);
       }
+    } else {
+      const blob = new Blob([chartText], { type: 'text/plain;charset=utf-8' });
+      const downloadUrl = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = downloadUrl;
+      a.download = `${artist} - ${title}.txt`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(downloadUrl);
     }
 
     if (state.currentSong) {
@@ -6642,7 +7558,9 @@ async function saveChartEditorChanges() {
     }
 
     showToast('Chart saved successfully! The changes are immediately active in the game.', 'success');
-    await loadLibrarySongs();
+    if (slug) {
+      await loadLibrarySongs();
+    }
   } catch (err) {
     showToast(`Error saving chart: ${err.message}`, 'error');
   } finally {

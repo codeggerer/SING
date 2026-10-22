@@ -100,6 +100,20 @@ function testYouTubeEmbedErrorHandling() {
     'Fallback must notify user when switching to alternate video'
   );
 
+  // Verify deadlink auto-recovery (Phase 1.2)
+  assert(
+    appJs.includes('/api/youtube?q=') && appJs.includes('Official Audio'),
+    'Fallback must auto-dispatch to /api/youtube with Official Audio query'
+  );
+  assert(
+    appJs.includes('Math.abs((v.durationSec || 0) - durationSec) <= 5'),
+    'Fallback must match duration with ±5s tolerance'
+  );
+  assert(
+    appJs.includes('/api/library/') && appJs.includes('/video'),
+    'Fallback must update library meta.json via /api/library/:slug/video'
+  );
+
   // Verify audio-only studio audio fallback
   assert(appJs.includes('function enableAudioOnlyStageMode('), 'app.js must declare enableAudioOnlyStageMode');
   assert(

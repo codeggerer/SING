@@ -19,15 +19,24 @@ echo "=========================================================="
 # 1. Node.js Test Suite
 echo ""
 echo "─── [1/3] JavaScript Engine & Gateway Unit Tests ───"
+node tests/usdb_client_test.js
+node tests/sync_test.js
 node tests/resolver_test.js
 node tests/jobs_test.js
 node tests/settings_test.js
 node tests/stem_mixer_test.js
 node tests/pitch_tracking_test.js
 node tests/highway_rendering_test.js
+node tests/stage_arena_test.js
+node tests/chart_editor_test.js
 node tests/calibration_test.js
 node tests/robustness_test.js
 node tests/engine_test.js
+node tests/test_lyrics.js
+node tests/test_lyrics_harvester.js
+node tests/phase5_paste_lyrics_test.js
+node tests/tier2_precision_test.js
+node tests/tier_consistency_phase5_test.js
 
 # 2. Python Unit Tests
 echo ""

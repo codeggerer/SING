@@ -34,6 +34,7 @@ from karaoke import (
     StageCache,
     compute_audio_sha1,
     separate_stems,
+    separate_mel_band_roformer,
     MONOSYLLABLE_WORDS,
     count_phonetic_syllables,
     split_syllables,
@@ -63,6 +64,14 @@ from karaoke import (
     USTAR_BPM,
     BEAT_DUR_SEC,
     GAP,
+    load_silero_vad,
+    detect_vocal_intervals,
+    extract_speech_timestamps,
+    calculate_acoustic_line_breaks,
+    apply_vad_mask,
+    apply_acoustic_breath_breaks,
+    filter_hallucinations_vad,
+    build_whisper_initial_prompt,
 )
 
 
@@ -92,6 +101,8 @@ def main():
                         help="Gesangsbereich (auto, female, male)")
     parser.add_argument("--lyrics-json", default=None,
                         help="Pfad zu kanonischer lyrics.json (Phase 2)")
+    parser.add_argument("--plain-lyrics", default=None,
+                        help="Pfad zu ungesyncter Textdatei plain_lyrics.txt (Phase 1/2 Forced Alignment)")
     # Phase 3 additions:
     parser.add_argument("--quality", choices=["fast", "balanced", "best"], default="balanced",
                         help="Qualitätsstufe (fast, balanced, best)")
@@ -104,6 +115,11 @@ def main():
     # Phase 7 additions:
     parser.add_argument("--debug-dir", default=None,
                         help="Ausgabeordner für Debug-Artefakte (contour.png, report.json)")
+    # Phase 4 additions (Tier 4 Pure AI Fallback):
+    parser.add_argument("--silence-threshold", type=float, default=0.35,
+                        help="Silero VAD Schwellenwert für Sprachaktivität (Phase 4.1)")
+    parser.add_argument("--initial-prompt", default=None,
+                        help="Whisper initial_prompt für Metadaten-Konditionierung (Phase 4.2)")
 
     args = parser.parse_args()
 
@@ -129,10 +145,13 @@ def main():
         key=args.key,
         vocal_range=args.vocal_range,
         lyrics_json=args.lyrics_json,
+        plain_lyrics=args.plain_lyrics,
         quality=args.quality,
         device=override_device,
         use_cache=not args.no_cache,
         debug_dir=args.debug_dir,
+        silence_threshold=args.silence_threshold,
+        initial_prompt=args.initial_prompt,
     )
 
     if args.json_progress:

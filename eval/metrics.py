@@ -259,13 +259,17 @@ def compute_timing_metrics(
 def compute_pitch_accuracy(
     truth_notes: List[Dict[str, Any]],
     gen_notes: List[Dict[str, Any]],
+    anchor_octave: bool = False,
+    scale_pcs: Optional[Set[int]] = None,
 ) -> Dict[str, float]:
     """
     Compute duration-weighted pitch accuracy:
-    - strict ±0 semitones
-    - strict ±1 semitone
+    - strict ±0 semitones (anchored to song octave register)
+    - strict ±1 semitone (anchored to song octave register)
     - octave-agnostic (mod 12) ±0 semitones
     - octave-agnostic (mod 12) ±1 semitone
+    - raw strict ±0 and ±1 without octave anchoring
+    - in-scale pitch adherence rate (if scale_pcs provided)
     Calculated over all overlapping time segments between pitched truth notes and generated notes.
     """
     # Filter out unpitched notes (e.g. Freestyle 'F')
@@ -279,10 +283,7 @@ def compute_pitch_accuracy(
     ]
 
     total_overlap_sec = 0.0
-    weighted_strict_0 = 0.0
-    weighted_strict_1 = 0.0
-    weighted_octave_0 = 0.0
-    weighted_octave_1 = 0.0
+    overlaps: List[Tuple[float, int, int]] = []
 
     for g in valid_gen:
         g_s = float(g.get("start_sec", 0.0))
@@ -299,37 +300,87 @@ def compute_pitch_accuracy(
                 continue
 
             total_overlap_sec += overlap
+            overlaps.append((overlap, g_pitch, t_pitch))
 
-            # Strict error
-            diff = abs(g_pitch - t_pitch)
-            if diff == 0:
-                weighted_strict_0 += overlap
-            if diff <= 1:
-                weighted_strict_1 += overlap
-
-            # Octave-agnostic error (mod 12)
-            diff_mod = abs((g_pitch % 12) - (t_pitch % 12))
-            diff_oct = min(diff_mod, 12 - diff_mod)
-            if diff_oct == 0:
-                weighted_octave_0 += overlap
-            if diff_oct <= 1:
-                weighted_octave_1 += overlap
-
-    if total_overlap_sec > 0:
+    if total_overlap_sec <= 0.0:
         return {
-            "pitch_strict_0": round(weighted_strict_0 / total_overlap_sec, 4),
-            "pitch_strict_1": round(weighted_strict_1 / total_overlap_sec, 4),
-            "pitch_octave_0": round(weighted_octave_0 / total_overlap_sec, 4),
-            "pitch_octave_1": round(weighted_octave_1 / total_overlap_sec, 4),
-            "total_overlap_sec": round(total_overlap_sec, 2),
+            "pitch_strict_0": 0.0,
+            "pitch_strict_1": 0.0,
+            "pitch_octave_0": 0.0,
+            "pitch_octave_1": 0.0,
+            "raw_pitch_strict_0": 0.0,
+            "raw_pitch_strict_1": 0.0,
+            "octave_shift": 0,
+            "in_scale_rate": 0.0,
+            "total_overlap_sec": 0.0,
         }
 
+    # 1. Determine optimal octave anchor k* in [-4, 4]
+    best_k = 0
+    best_k_score = -1.0
+    if anchor_octave:
+        for k in range(-4, 5):
+            k_score = 0.0
+            for ov, gp, tp in overlaps:
+                shifted_tp = tp + (12 * k)
+                if abs(gp - shifted_tp) <= 1:
+                    k_score += ov
+            # Slight tie-breaker preference for k=0 (standard pitch)
+            if k == 0:
+                k_score += 1e-6
+            if k_score > best_k_score:
+                best_k_score = k_score
+                best_k = k
+
+    # 2. Compute weighted metrics using best_k
+    weighted_strict_0 = 0.0
+    weighted_strict_1 = 0.0
+    raw_strict_0 = 0.0
+    raw_strict_1 = 0.0
+    weighted_octave_0 = 0.0
+    weighted_octave_1 = 0.0
+    in_scale_dur = 0.0
+
+    for ov, gp, tp in overlaps:
+        # Anchored strict
+        diff_anchored = abs(gp - (tp + 12 * best_k))
+        if diff_anchored == 0:
+            weighted_strict_0 += ov
+        if diff_anchored <= 1:
+            weighted_strict_1 += ov
+
+        # Raw unanchored
+        diff_raw = abs(gp - tp)
+        if diff_raw == 0:
+            raw_strict_0 += ov
+        if diff_raw <= 1:
+            raw_strict_1 += ov
+
+        # Octave-agnostic error (mod 12)
+        diff_mod = abs((gp % 12) - (tp % 12))
+        diff_oct = min(diff_mod, 12 - diff_mod)
+        if diff_oct == 0:
+            weighted_octave_0 += ov
+        if diff_oct <= 1:
+            weighted_octave_1 += ov
+
+        # In-scale check
+        if scale_pcs is not None:
+            if (gp % 12) in scale_pcs:
+                in_scale_dur += ov
+
+    in_scale_rate = round(in_scale_dur / total_overlap_sec, 4) if scale_pcs is not None else 1.0
+
     return {
-        "pitch_strict_0": 0.0,
-        "pitch_strict_1": 0.0,
-        "pitch_octave_0": 0.0,
-        "pitch_octave_1": 0.0,
-        "total_overlap_sec": 0.0,
+        "pitch_strict_0": round(weighted_strict_0 / total_overlap_sec, 4),
+        "pitch_strict_1": round(weighted_strict_1 / total_overlap_sec, 4),
+        "pitch_octave_0": round(weighted_octave_0 / total_overlap_sec, 4),
+        "pitch_octave_1": round(weighted_octave_1 / total_overlap_sec, 4),
+        "raw_pitch_strict_0": round(raw_strict_0 / total_overlap_sec, 4),
+        "raw_pitch_strict_1": round(raw_strict_1 / total_overlap_sec, 4),
+        "octave_shift": best_k,
+        "in_scale_rate": in_scale_rate,
+        "total_overlap_sec": round(total_overlap_sec, 2),
     }
 
 
@@ -352,6 +403,10 @@ class EvalMetrics:
     truth_note_count: int
     gen_note_count: int
     total_overlap_sec: float
+    octave_shift: int = 0
+    raw_pitch_strict_0: float = 0.0
+    raw_pitch_strict_1: float = 0.0
+    in_scale_rate: float = 1.0
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -360,12 +415,14 @@ class EvalMetrics:
 def evaluate_chart(
     truth_notes: List[Dict[str, Any]],
     gen_notes: List[Dict[str, Any]],
+    anchor_octave: bool = False,
+    scale_pcs: Optional[Set[int]] = None,
 ) -> EvalMetrics:
     """
     Run full metric suite comparing a generated note list against truth notes.
     """
     # 1. Pitch
-    pitch_res = compute_pitch_accuracy(truth_notes, gen_notes)
+    pitch_res = compute_pitch_accuracy(truth_notes, gen_notes, anchor_octave=anchor_octave, scale_pcs=scale_pcs)
 
     # 2. Timing & False Splits
     timing_res = compute_timing_metrics(truth_notes, gen_notes)
@@ -390,4 +447,8 @@ def evaluate_chart(
         truth_note_count=len(truth_notes),
         gen_note_count=len(gen_notes),
         total_overlap_sec=pitch_res["total_overlap_sec"],
+        octave_shift=pitch_res["octave_shift"],
+        raw_pitch_strict_0=pitch_res["raw_pitch_strict_0"],
+        raw_pitch_strict_1=pitch_res["raw_pitch_strict_1"],
+        in_scale_rate=pitch_res["in_scale_rate"],
     )

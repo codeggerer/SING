@@ -36,10 +36,13 @@ class KaraokeJob:
     key: str = ""
     vocal_range: str = "auto"
     lyrics_json: Optional[Path | str] = None
+    plain_lyrics: Optional[Path | str] = None
     quality: str = DEFAULT_QUALITY
     device: Optional[str] = None
     use_cache: bool = True
     debug_dir: Optional[Path | str] = None
+    silence_threshold: float = 0.35
+    initial_prompt: Optional[str] = None
 
 
 def run(
@@ -129,6 +132,11 @@ def run(
         progress_cb=pitch_progress,
     )
 
+    # Breakthrough 5: Ensure Harmonic Octave Continuity Filter (HOCF) is applied
+    if not pitch_data.get("hocf_applied", False):
+        from karaoke.pitch import apply_harmonic_octave_continuity_filter
+        pitch_data = apply_harmonic_octave_continuity_filter(pitch_data)
+
     # Step 4: Lyrics & Forced Alignment (weight: 0.65 -> 0.85)
     def lyrics_progress(s, sub_frac, m):
         report("lyrics", 0.65 + 0.20 * sub_frac, m)
@@ -149,6 +157,31 @@ def run(
             words, detected_lang = res
             lyrics_source = "canonical"
 
+    # Priority 2: Unsynced plain-text lyrics (Phase 2 MMS-FA forced alignment)
+    if not words and job.plain_lyrics and Path(job.plain_lyrics).exists():
+        from karaoke.align_mms import align_plain_lyrics_mms
+        lyrics_progress("lyrics", 0.2, "Aligning plain-text lyrics via Meta MMS-FA...")
+        try:
+            with open(job.plain_lyrics, "r", encoding="utf-8") as f:
+                plain_text = f.read()
+            lang = "de" if any(c in plain_text.lower() for c in "äöüß") else "en"
+            words = align_plain_lyrics_mms(
+                vocals_file,
+                plain_text,
+                pitch_data=pitch_data,
+                lang=lang,
+                hardware_profile=hw,
+            )
+            if words:
+                detected_lang = lang
+                lyrics_source = "plain_mms"
+                print(f"✅ Ausrichtung über Meta MMS-FA erfolgreich: {len(words)} Noten/Silben (0% WER)")
+                lyrics_progress("lyrics", 1.0, f"Aligned {len(words)} syllables via MMS-FA (0% WER)")
+        except Exception as e:
+            print(f"⚠️ MMS Plain Lyrics Alignment fehlgeschlagen ({e}). Weiche auf Whisper aus...")
+            words = []
+
+    # Priority 3: Fallback to Whisper Speech-to-Text transcription (Phase 4 AI Fallback)
     if not words:
         words, detected_lang = transcribe_lyrics(
             vocals_file,
@@ -157,6 +190,10 @@ def run(
             model_selection=models,
             stage_cache=stage_cache,
             progress_cb=lyrics_progress,
+            artist=job.artist,
+            title=job.title,
+            silence_threshold=job.silence_threshold,
+            initial_prompt=job.initial_prompt,
         )
 
     # Optional: Basic Pitch note prediction for split voting & octave tie-breaking
@@ -184,6 +221,7 @@ def run(
         key_info=key_info,
         basic_pitch_notes=bp_notes,
         return_word_notes=True,
+        vocals_path=vocals_file,
     )
 
     # Optional: Debug Artifact Export (contour.png and report.json, PLAN.md Phase 7.3)
@@ -211,6 +249,13 @@ def run(
         except Exception:
             pass
 
+    final_vocals = output_dir / f"{clean_filename} [Vocals].wav"
+    if vocals_file.exists():
+        try:
+            shutil.copyfile(vocals_file, final_vocals)
+        except Exception:
+            pass
+
     # Save meta.json
     meta = {
         "generator_version": "5.0-refactor",
@@ -224,6 +269,7 @@ def run(
         "models_used": models.to_dict(),
         "output_txt": str(output_txt),
         "instrumental_wav": str(final_instrumental),
+        "vocals_wav": str(final_vocals) if final_vocals.exists() else str(vocals_file),
     }
     meta_path = output_dir / f"{clean_filename}.meta.json"
     try:
@@ -240,7 +286,7 @@ def run(
         "title": title,
         "output_txt": output_txt,
         "instrumental_wav": final_instrumental,
-        "vocals_wav": vocals_file,
+        "vocals_wav": final_vocals if final_vocals.exists() else vocals_file,
         "meta_json": meta_path,
         "lyrics_source": lyrics_source,
         "debug_dir": str(Path(job.debug_dir).resolve()) if job.debug_dir else None,

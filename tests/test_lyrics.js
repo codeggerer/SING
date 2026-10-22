@@ -11,6 +11,7 @@ const {
   normalizeSpicyLyrics,
   normalizeSpotifyColorLyrics,
   normalizeLrclib,
+  parseAppleMusicTtml,
   validateLyricsDoc,
   rankSyncType,
   detectLanguage,
@@ -234,6 +235,28 @@ async function runTests() {
     assert.ok(res.reason.includes('below required 70%'));
   });
 
+  it('Accepts track with long instrumental intro and outro measured against active vocal region', () => {
+    // 200s audio, intro 45s, outro 45s, vocal section 45s -> 155s (110s duration)
+    // Under raw duration: 110 / 200 = 55% (< 70%), but relative to active vocal region: 100%
+    const introOutroDoc = {
+      lines: [
+        { start: 45.0, end: 50.0, words: 'Verse 1 begins after long guitar intro' },
+        { start: 100.0, end: 110.0, words: 'Chorus in the middle' },
+        { start: 150.0, end: 155.0, words: 'Final line before long outro solo' },
+      ],
+    };
+    const res = validateLyricsDoc(introOutroDoc, { durationSec: 200 });
+    assert.strictEqual(res.valid, true);
+
+    // Also supports explicit vocalStartSec / vocalEndSec
+    const resExplicit = validateLyricsDoc(introOutroDoc, {
+      durationSec: 200,
+      vocalStartSec: 45.0,
+      vocalEndSec: 155.0,
+    });
+    assert.strictEqual(resExplicit.valid, true);
+  });
+
   console.log(`\n--- Test Suite 6: Sync Rank & Rate Limiter ---`);
 
   it('Ranks sync types correctly (syllable > word > line > static)', () => {
@@ -251,6 +274,126 @@ async function runTests() {
     assert.strictEqual(bucket.secTokens, 1);
     await bucket.acquire();
     assert.strictEqual(bucket.secTokens, 0);
+  });
+
+  console.log(`\n--- Test Suite 7: Apple Music TTML Parser & Syllable Precision (Phase 3) ---`);
+
+  it('Parses Apple Music TTML with millisecond syllable bounds and background vocals', () => {
+    const ttmlRaw = fs.readFileSync(path.join(FIXTURES_DIR, 'apple_music_syllable.ttml'), 'utf8');
+    const doc = parseAppleMusicTtml(ttmlRaw);
+
+    assert.ok(doc, 'Should return a valid LyricsDoc from TTML');
+    assert.strictEqual(doc.source, 'apple');
+    assert.strictEqual(doc.syncType, 'syllable');
+    assert.strictEqual(doc.title, 'Hello World');
+    assert.strictEqual(doc.artist, 'Test Artist');
+    assert.strictEqual(doc.lines.length, 2);
+
+    const line0 = doc.lines[0];
+    assert.strictEqual(line0.start, 12.34);
+    assert.strictEqual(line0.startTime, 12.34);
+    assert.strictEqual(line0.end, 14.4);
+    assert.strictEqual(line0.endTime, 14.4);
+    assert.strictEqual(line0.agent, 'lead');
+    assert.strictEqual(line0.words, 'Hel-lo world');
+    assert.strictEqual(line0.text, 'Hel-lo world');
+    assert.strictEqual(line0.syllables.length, 3);
+
+    const s0 = line0.syllables[0];
+    assert.strictEqual(s0.text, 'Hel-');
+    assert.strictEqual(s0.start, 12.34);
+    assert.strictEqual(s0.startTime, 12.34);
+    assert.strictEqual(s0.end, 12.8);
+    assert.strictEqual(s0.endTime, 12.8);
+    assert.strictEqual(s0.joinNext, true);
+
+    const s1 = line0.syllables[1];
+    assert.strictEqual(s1.text, 'lo ');
+    assert.strictEqual(s1.start, 12.8);
+    assert.strictEqual(s1.startTime, 12.8);
+    assert.strictEqual(s1.end, 13.5);
+    assert.strictEqual(s1.endTime, 13.5);
+    assert.strictEqual(s1.joinNext, false);
+
+    const s2 = line0.syllables[2];
+    assert.strictEqual(s2.text, 'world');
+    assert.strictEqual(s2.start, 13.6);
+    assert.strictEqual(s2.startTime, 13.6);
+    assert.strictEqual(s2.end, 14.4);
+    assert.strictEqual(s2.endTime, 14.4);
+    assert.strictEqual(s2.joinNext, false);
+
+    const line1 = doc.lines[1];
+    assert.strictEqual(line1.agent, 'background');
+    assert.strictEqual(line1.start, 17.1);
+    assert.strictEqual(line1.startTime, 17.1);
+    assert.strictEqual(line1.end, 20.5);
+    assert.strictEqual(line1.endTime, 20.5);
+  });
+
+  console.log(`\n--- Test Suite 8: SpicyLyrics Compact Syllable Schema c: [{ s, t, e }] (Phase 3) ---`);
+
+  it('Parses SpicyLyrics compact syllable format c: [{ s, t, e }]', () => {
+    const raw = JSON.parse(
+      fs.readFileSync(path.join(FIXTURES_DIR, 'spicylyrics_compact_syllable.json'), 'utf8')
+    );
+    const doc = normalizeSpicyLyrics(raw);
+
+    assert.ok(doc, 'Should parse compact schema');
+    assert.strictEqual(doc.source, 'spicylyrics');
+    assert.strictEqual(doc.syncType, 'syllable');
+    assert.strictEqual(doc.artist, 'Test Artist');
+    assert.strictEqual(doc.title, 'Hello World');
+    assert.strictEqual(doc.lines.length, 2);
+
+    const line0 = doc.lines[0];
+    assert.strictEqual(line0.agent, 'lead');
+    assert.strictEqual(line0.start, 12.0);
+    assert.strictEqual(line0.startTime, 12.0);
+    assert.strictEqual(line0.end, 16.8);
+    assert.strictEqual(line0.endTime, 16.8);
+    assert.strictEqual(line0.syllables.length, 3);
+    assert.strictEqual(line0.syllables[0].text, 'Hel-');
+    assert.strictEqual(line0.syllables[0].start, 12.34);
+    assert.strictEqual(line0.syllables[0].startTime, 12.34);
+    assert.strictEqual(line0.syllables[0].end, 12.8);
+    assert.strictEqual(line0.syllables[0].endTime, 12.8);
+    assert.strictEqual(line0.syllables[0].joinNext, true);
+
+    const line1 = doc.lines[1];
+    assert.strictEqual(line1.agent, 'background');
+    assert.strictEqual(line1.start, 17.1);
+    assert.strictEqual(line1.startTime, 17.1);
+  });
+
+  console.log(`\n--- Test Suite 9: Canonical LyricsDoc Schema Dual Compatibility (Phase 3) ---`);
+
+  it('Verifies LyricsDoc canonical schema contains artist, title, startTime, endTime, and text', () => {
+    const canonicalDoc = {
+      artist: 'Queen',
+      title: 'Bohemian Rhapsody',
+      syncType: 'syllable',
+      lines: [
+        {
+          startTime: 12.34,
+          endTime: 16.8,
+          text: 'Hello world',
+          syllables: [
+            { text: 'Hel-', startTime: 12.34, endTime: 12.8 },
+            { text: 'lo ', startTime: 12.8, endTime: 13.5 },
+            { text: 'world', startTime: 13.6, endTime: 14.4 },
+          ],
+        },
+      ],
+    };
+
+    // Quality gate should validate successfully using startTime and endTime
+    const val = validateLyricsDoc(canonicalDoc);
+    assert.strictEqual(val.valid, true);
+    assert.strictEqual(canonicalDoc.artist, 'Queen');
+    assert.strictEqual(canonicalDoc.title, 'Bohemian Rhapsody');
+    assert.strictEqual(canonicalDoc.lines[0].startTime, 12.34);
+    assert.strictEqual(canonicalDoc.lines[0].text, 'Hello world');
   });
 
   console.log(`\n====================================================`);

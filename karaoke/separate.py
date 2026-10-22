@@ -105,54 +105,17 @@ def _separate_roformer(
     stage_cache: Optional[StageCache] = None,
     progress_cb: Optional[Callable[[str, float, str], None]] = None,
 ) -> Tuple[Path, Path]:
-    """Separation using audio-separator Mel-Band RoFormer."""
-    from audio_separator.separator import Separator
+    """Separation using audio-separator Mel-Band RoFormer (Breakthrough 3)."""
+    from karaoke.separate_roformer import separate_mel_band_roformer
 
-    out_dir.mkdir(parents=True, exist_ok=True)
-    if progress_cb:
-        progress_cb("separate", 0.1, "Starting Mel-Band RoFormer vocal separation...")
-
-    print("\n" + "=" * 65)
-    print("[1/4] 🎵 Stimm- und Instrumental-Trennung mit Mel-Band RoFormer")
-    print("=" * 65)
-
-    sep = Separator(
-        output_dir=str(out_dir),
-        output_format="WAV",
-        log_level=30,  # WARNING
+    dev = hardware_profile.device if hardware_profile else "auto"
+    return separate_mel_band_roformer(
+        audio_path=audio_path,
+        output_dir=out_dir,
+        device=dev,
+        stage_cache=stage_cache,
+        progress_cb=progress_cb,
     )
-    # Kim vocal model / Mel-Band RoFormer
-    sep.load_model("model_mel_band_roformer_crowd.onnx")
-    outputs = sep.separate(str(audio_path))
-
-    vocals_file = None
-    instrumental_file = None
-    for out_f in outputs:
-        p = out_dir / out_f
-        if "vocals" in out_f.lower():
-            vocals_file = p
-        elif "instrumental" in out_f.lower() or "no_vocals" in out_f.lower() or "background" in out_f.lower():
-            instrumental_file = p
-
-    if vocals_file is None or instrumental_file is None:
-        raise RuntimeError("RoFormer hat nicht beide Stems erzeugt.")
-
-    dest_vocals = out_dir / "vocals.wav"
-    dest_instrumental = out_dir / "no_vocals.wav"
-    shutil.move(str(vocals_file), str(dest_vocals))
-    shutil.move(str(instrumental_file), str(dest_instrumental))
-
-    if stage_cache:
-        try:
-            shutil.copyfile(dest_vocals, stage_cache.vocals_path)
-            shutil.copyfile(dest_instrumental, stage_cache.instrumental_path)
-        except Exception:
-            pass
-
-    if progress_cb:
-        progress_cb("separate", 1.0, "Vocal separation complete")
-
-    return dest_vocals, dest_instrumental
 
 
 def _separate_demucs(
@@ -213,3 +176,86 @@ def _separate_demucs(
     print(f"✅ Gesangsspur: {legacy_vocals}")
     print(f"✅ Instrumentalspur: {legacy_instrumental}")
     return legacy_vocals, legacy_instrumental
+
+
+if __name__ == "__main__":
+    import argparse
+    import json
+
+    parser = argparse.ArgumentParser(description="Separate vocals and instrumental stems (Demucs / RoFormer)")
+    parser.add_argument("input_audio", help="Path to input audio file (WAV, MP3, etc.)")
+    parser.add_argument("--output_dir", default="./output", help="Destination folder for stems")
+    parser.add_argument("--separator", choices=["demucs", "roformer"], default="demucs", help="Stem separation algorithm")
+    parser.add_argument("--device", choices=["auto", "cpu", "mps", "cuda"], default="auto", help="Hardware device override")
+    parser.add_argument("--quality", choices=["fast", "balanced", "best"], default="balanced", help="Separation quality profile")
+    parser.add_argument("--json-progress", action="store_true", default=False, help="Emit progress events as JSON lines")
+    parser.add_argument("--no-cache", action="store_true", default=False, help="Disable stage cache")
+
+    args = parser.parse_args()
+
+    audio_file = Path(args.input_audio).resolve()
+    out_dir = Path(args.output_dir).resolve()
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    if not audio_file.exists():
+        if args.json_progress:
+            print(json.dumps({"status": "error", "message": f"File not found: {audio_file}"}), flush=True)
+        else:
+            print(f"Error: File not found: {audio_file}", file=sys.stderr)
+        sys.exit(1)
+
+    override_device = None if args.device == "auto" else args.device
+    hw = detect_hardware(override_device=override_device)
+    models = select_models(hw, quality=args.quality, requested_separator=args.separator)
+    cache = StageCache(out_dir, audio_file) if not args.no_cache else None
+
+    if args.json_progress:
+        def prog_cb(stage: str, fraction: float, message: str):
+            print(json.dumps({"stage": stage, "fraction": fraction, "message": message}), flush=True)
+    else:
+        def prog_cb(stage: str, fraction: float, message: str):
+            pass
+
+    try:
+        vocals_path, inst_path = separate_stems(
+            audio_path=audio_file,
+            output_dir=out_dir,
+            separator=args.separator,
+            hardware_profile=hw,
+            model_selection=models,
+            stage_cache=cache,
+            progress_cb=prog_cb,
+        )
+
+        direct_vocals = out_dir / "vocals.wav"
+        direct_inst = out_dir / "instrumental.wav"
+        if vocals_path != direct_vocals and vocals_path.exists():
+            try:
+                shutil.copyfile(vocals_path, direct_vocals)
+                vocals_path = direct_vocals
+            except Exception:
+                pass
+        if inst_path != direct_inst and inst_path.exists():
+            try:
+                shutil.copyfile(inst_path, direct_inst)
+                inst_path = direct_inst
+            except Exception:
+                pass
+
+        if args.json_progress:
+            print(json.dumps({
+                "status": "done",
+                "vocals_path": str(vocals_path),
+                "instrumental_path": str(inst_path),
+            }), flush=True)
+        else:
+            print(f"✅ Vocals: {vocals_path}")
+            print(f"✅ Instrumental: {inst_path}")
+
+    except Exception as e:
+        if args.json_progress:
+            print(json.dumps({"status": "error", "message": str(e)}), flush=True)
+        else:
+            print(f"Separation failed: {e}", file=sys.stderr)
+        sys.exit(1)
+

@@ -9,6 +9,7 @@ const {
   setLocalConfig,
   setPkceToken,
 } = require('./lib/lyrics');
+const { harvestPlainLyricsFull } = require('./lib/lyrics_harvester');
 const { resolveInput } = require('./lib/resolver');
 const {
   checkSystemHealth,
@@ -18,7 +19,7 @@ const {
   registerJobSse,
   JOBS_DIR,
 } = require('./lib/jobs');
-const { listLibrarySongs, serveSongFile, updateSongChart, deleteSong, SONGS_DIR } = require('./lib/library');
+const { listLibrarySongs, serveSongFile, updateSongChart, updateSongVideoId, deleteSong, SONGS_DIR } = require('./lib/library');
 
 const PORT = process.env.PORT || 3333;
 const PUBLIC_DIR = path.join(__dirname, 'public');
@@ -109,6 +110,8 @@ function readRequestBody(req) {
 // USDB Session & Caching
 const USDB_CONFIG_FILE = path.join(__dirname, 'usdb_config.json');
 const USDB_CACHE_DIR = path.join(__dirname, 'usdb_cache');
+const usdbClient = require('./lib/usdb_client');
+const audioSync = require('./lib/audio_sync');
 if (!fs.existsSync(USDB_CACHE_DIR)) {
   try {
     fs.mkdirSync(USDB_CACHE_DIR, { recursive: true });
@@ -128,177 +131,15 @@ if (fs.existsSync(USDB_CONFIG_FILE)) {
 }
 
 async function loginUsdb(user, pass) {
-  const form = new URLSearchParams();
-  form.set('user', user);
-  form.set('pass', pass);
-  form.set('login', 'Login');
-
-  const res = await postUrl('https://usdb.animux.de/index.php?link=login', form.toString());
-  const rawCookies = res.headers['set-cookie'];
-  if (!rawCookies || rawCookies.length === 0) {
-    throw new Error('Kein Cookie von USDB erhalten');
-  }
-
-  const sessionCookie = rawCookies
-    .map((c) => c.split(';')[0])
-    .filter((c) => c.startsWith('PHPSESSID='))
-    .join('; ');
-
-  if (!sessionCookie) {
-    throw new Error('USDB Login fehlgeschlagen (Kein PHPSESSID gefunden)');
-  }
-
-  // Verify by fetching list page
-  const verifyRes = await fetchUrl('https://usdb.animux.de/?link=list', {
-    Cookie: sessionCookie,
-  });
-
-  if (verifyRes.body.includes('userpass3') && !verifyRes.body.includes(user)) {
-    throw new Error('Falscher USDB Benutzername oder Passwort!');
-  }
-
-  usdbSession = {
-    username: user,
-    cookie: sessionCookie,
-    loggedInAt: Date.now(),
-  };
-
-  fs.writeFileSync(USDB_CONFIG_FILE, JSON.stringify(usdbSession, null, 2));
-  console.log(`✓ USDB Login erfolgreich für: ${user}`);
-  return usdbSession;
-}
-
-function parseSongsFromUsdbHtml(html) {
-  if (!html) return [];
-  const songs = [];
-  const rows = [...html.matchAll(/<tr class="list_tr[12].*?>\s*([\s\S]*?)\s*<\/tr>/gm)];
-
-  for (const row of rows) {
-    const rowHtml = row[1];
-    const idMatch =
-      rowHtml.match(/show_detail\((\d+)\)/) ||
-      rowHtml.match(/link=detail&amp;id=(\d+)/) ||
-      rowHtml.match(/id=(\d+)/);
-    const songId = idMatch ? parseInt(idMatch[1], 10) : null;
-    if (!songId) continue;
-
-    const cols = [...rowHtml.matchAll(/<td[^>]*>([\s\S]*?)<\/td>/gi)].map((m) =>
-      m[1].replace(/<[^>]+>/g, '').trim()
-    );
-
-    if (cols.length >= 2) {
-      const artist = cols[0];
-      const title = cols[1];
-      const language = cols[6] || '';
-      const year = cols[4] || '';
-
-      songs.push({
-        isUsdb: true,
-        isUltraStar: true,
-        usdbId: songId,
-        artistName: artist,
-        trackName: title,
-        language,
-        year,
-        artworkUrl: `https://usdb.animux.de/data/cover/${songId}.jpg`,
-      });
-    }
-  }
-
-  return songs;
+  return await usdbClient.loginUsdb(user, pass);
 }
 
 async function searchUsdb(query) {
-  if (!usdbSession.cookie) return [];
-
-  const form = new URLSearchParams();
-  form.set('order', 'lastchange');
-  form.set('ud', 'desc');
-  form.set('limit', '40');
-  form.set('start', '0');
-
-  const tokens = query.trim().split(/\s+/);
-  if (tokens.length === 1) {
-    form.set('interpret', tokens[0]);
-  } else {
-    form.set('interpret', tokens[0]);
-    form.set('title', tokens.slice(1).join(' '));
-  }
-
-  const res = await postUrl('https://usdb.animux.de/?link=list', form.toString(), {
-    Cookie: usdbSession.cookie,
-  });
-
-  let songs = parseSongsFromUsdbHtml(res.body);
-
-  if (songs.length === 0 && tokens.length > 1) {
-    const form2 = new URLSearchParams();
-    form2.set('order', 'lastchange');
-    form2.set('ud', 'desc');
-    form2.set('limit', '40');
-    form2.set('start', '0');
-    form2.set('title', query.trim());
-    const res2 = await postUrl('https://usdb.animux.de/?link=list', form2.toString(), {
-      Cookie: usdbSession.cookie,
-    });
-    songs = parseSongsFromUsdbHtml(res2.body);
-  }
-
-  return songs;
+  return await usdbClient.searchUsdb(query);
 }
 
 async function getUsdbSong(id) {
-  const cachedFile = path.join(USDB_CACHE_DIR, `${id}.txt`);
-  if (fs.existsSync(cachedFile)) {
-    const cachedTxt = fs.readFileSync(cachedFile, 'utf8');
-    const m = cachedTxt.match(/#VIDEO:.*?(?:v=|youtu\.be\/|\/embed\/)([a-zA-Z0-9_-]{11})/i);
-    return {
-      id,
-      txt: cachedTxt,
-      videoId: m ? m[1] : '',
-    };
-  }
-
-  if (!usdbSession.cookie) {
-    throw new Error('Nicht bei USDB eingeloggt');
-  }
-
-  // Fetch editsongs page to get the raw UltraStar .txt file
-  const lyricsRes = await fetchUrl(`https://usdb.animux.de/?link=editsongs&id=${id}`, {
-    Cookie: usdbSession.cookie,
-  });
-
-  const txtMatch = lyricsRes.body.match(/<textarea.*?>([\s\S]*?)<\/textarea>/im);
-  if (!txtMatch || !txtMatch[1].trim()) {
-    throw new Error('Konnte Notendatei von USDB nicht abrufen');
-  }
-
-  const rawTxt = txtMatch[1].trim();
-
-  // Try to find YouTube video ID from comments on detail page
-  let videoId = '';
-  try {
-    const detailRes = await fetchUrl(`https://usdb.animux.de/?link=detail&id=${id}`, {
-      Cookie: usdbSession.cookie,
-    });
-    const ytMatch = detailRes.body.match(
-      /(?:youtube\.com\/(?:watch\?v=|embed\/)|youtu\.be\/)([a-zA-Z0-9_-]{11})/i
-    );
-    if (ytMatch) {
-      videoId = ytMatch[1];
-    }
-  } catch (_) {}
-
-  // Cache locally
-  try {
-    fs.writeFileSync(cachedFile, rawTxt, 'utf8');
-  } catch (_) {}
-
-  return {
-    id,
-    txt: rawTxt,
-    videoId,
-  };
+  return await usdbClient.getUsdbSong(id);
 }
 
 function parseDurationString(str) {
@@ -357,8 +198,22 @@ async function searchYouTube(query, targetDurationSec = 0) {
         syncScore -= diff * 3.5; // strongly prefer matching duration
       }
 
+      const expectedTitle = (query.includes(' - ') ? query.split(' - ').slice(1).join(' - ') : query)
+        .toLowerCase()
+        .replace(/[^\w\s]/g, '')
+        .trim();
+      const normTitle = lowerTitle.replace(/[^\w\s]/g, '');
+      if (expectedTitle && expectedTitle.length >= 3 && normTitle.includes(expectedTitle)) {
+        syncScore += 60; // Strong bonus: video title explicitly contains target song title
+      } else if (expectedTitle && expectedTitle.length >= 4) {
+        syncScore -= 45; // Strong penalty: video is likely a different song by the same artist
+      }
+
       if (lowerTitle.includes('official audio') || lowerTitle.includes('(audio)')) syncScore += 25;
+      if (lowerTitle.includes('official video') || lowerTitle.includes('official visualizer') || lowerTitle.includes('music video')) syncScore += 35;
+      if (lowerChannel.includes('official')) syncScore += 30;
       if (lowerChannel.includes('- topic')) syncScore += 30;
+      if (query && lowerChannel.includes(query.toLowerCase().split(' - ')[0].trim())) syncScore += 25;
       if (lowerTitle.includes('lyrics') || lowerTitle.includes('lyric video')) syncScore += 18;
       if (lowerTitle.includes('karaoke') || lowerTitle.includes('instrumental')) syncScore += 10;
       if (lowerTitle.includes('live') || lowerTitle.includes('concert')) syncScore -= 30;
@@ -470,8 +325,9 @@ const server = http.createServer(async (req, res) => {
   const pathname = parsedUrl.pathname;
 
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, HEAD');
+  res.setHeader('Access-Control-Allow-Headers', 'Range, Content-Type, Accept-Ranges');
+  res.setHeader('Access-Control-Expose-Headers', 'Content-Range, Accept-Ranges, Content-Length');
 
   if (req.method === 'OPTIONS') {
     res.writeHead(204);
@@ -544,6 +400,60 @@ const server = http.createServer(async (req, res) => {
       }
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       return res.end(JSON.stringify(doc));
+    }
+
+    // Plain Lyrics Harvest Endpoint (UNSYNCED_LYRICS_OVERHAUL_PLAN Phase 1)
+    if (pathname === '/api/lyrics/harvest' || pathname === '/api/lyrics/plain') {
+      let title = '';
+      let artist = '';
+      let durationSec = 0;
+      let youtubeId = '';
+
+      try {
+        if (req.method === 'POST') {
+          const body = await readRequestBody(req);
+          title = body.title || '';
+          artist = body.artist || '';
+          durationSec = parseFloat(body.duration || body.durationSec || '0') || 0;
+          youtubeId = body.youtubeId || body.videoId || '';
+          const candidates = Array.isArray(body.candidates) ? body.candidates : [];
+          const description = body.description || '';
+          const result = await harvestPlainLyricsFull({
+            artist,
+            title,
+            youtubeId,
+            candidates,
+            description,
+            durationSec,
+          });
+          if (!result || !result.lyrics) {
+            res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
+            return res.end(JSON.stringify({ error: 'No plain lyrics harvested' }));
+          }
+          res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+          return res.end(JSON.stringify(result));
+        } else {
+          title = parsedUrl.searchParams.get('title') || '';
+          artist = parsedUrl.searchParams.get('artist') || '';
+          durationSec = parseFloat(parsedUrl.searchParams.get('duration') || '0') || 0;
+          youtubeId = parsedUrl.searchParams.get('youtubeId') || parsedUrl.searchParams.get('v') || '';
+          const result = await harvestPlainLyricsFull({
+            artist,
+            title,
+            youtubeId,
+            durationSec,
+          });
+          if (!result || !result.lyrics) {
+            res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
+            return res.end(JSON.stringify({ error: 'No plain lyrics harvested' }));
+          }
+          res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+          return res.end(JSON.stringify(result));
+        }
+      } catch (err) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        return res.end(JSON.stringify({ error: err.message }));
+      }
     }
 
     // Health & Tool Status Endpoint (Phase 6.2)
@@ -626,6 +536,26 @@ const server = http.createServer(async (req, res) => {
         const content = fs.readFileSync(songTxtPath, 'utf8');
         res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
         return res.end(content);
+      }
+    }
+
+    // Update Song Video ID / Deadlink Recovery (Phase 1.2)
+    const libraryVideoMatch = pathname.match(/^\/api\/library\/([a-zA-Z0-9_-]+)\/video$/);
+    if (libraryVideoMatch && req.method === 'POST') {
+      const slug = libraryVideoMatch[1];
+      try {
+        const body = await readRequestBody(req);
+        const videoId = typeof body === 'object' && body ? body.videoId : '';
+        if (!videoId) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          return res.end(JSON.stringify({ error: 'Missing videoId in request body' }));
+        }
+        const result = updateSongVideoId(slug, videoId);
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        return res.end(JSON.stringify(result));
+      } catch (err) {
+        res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+        return res.end(JSON.stringify({ error: err.message }));
       }
     }
 
@@ -725,11 +655,12 @@ const server = http.createServer(async (req, res) => {
 
     // USDB API Endpoints
     if (pathname === '/api/usdb/status') {
+      const session = usdbClient.getUsdbSession();
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       return res.end(
         JSON.stringify({
-          loggedIn: !!usdbSession.cookie,
-          username: usdbSession.username || '',
+          loggedIn: !!session.cookie,
+          username: session.username || '',
         })
       );
     }
@@ -741,7 +672,7 @@ const server = http.createServer(async (req, res) => {
         return res.end(JSON.stringify({ error: 'Benutzername und Passwort erforderlich' }));
       }
       try {
-        const session = await loginUsdb(data.username, data.password);
+        const session = await usdbClient.loginUsdb(data.username, data.password);
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         return res.end(JSON.stringify({ success: true, username: session.username }));
       } catch (err) {
@@ -751,12 +682,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (pathname === '/api/usdb/logout' && req.method === 'POST') {
-      usdbSession = { username: '', cookie: '' };
-      if (fs.existsSync(USDB_CONFIG_FILE)) {
-        try {
-          fs.unlinkSync(USDB_CONFIG_FILE);
-        } catch (_) {}
-      }
+      usdbClient.logoutUsdb();
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       return res.end(JSON.stringify({ success: true }));
     }
@@ -767,12 +693,13 @@ const server = http.createServer(async (req, res) => {
         res.writeHead(400, { 'Content-Type': 'application/json' });
         return res.end(JSON.stringify({ error: 'Missing query parameter q' }));
       }
-      if (!usdbSession.cookie) {
+      const session = usdbClient.getUsdbSession();
+      if (!session.cookie) {
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         return res.end(JSON.stringify({ results: [], error: 'Not logged in to USDB' }));
       }
       try {
-        const results = await searchUsdb(q);
+        const results = await usdbClient.searchUsdb(q);
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         return res.end(JSON.stringify({ results }));
       } catch (err) {
@@ -788,17 +715,47 @@ const server = http.createServer(async (req, res) => {
         res.writeHead(400, { 'Content-Type': 'application/json' });
         return res.end(JSON.stringify({ error: 'Missing parameter id' }));
       }
-      if (!usdbSession.cookie) {
+      const session = usdbClient.getUsdbSession();
+      if (!session.cookie && !usdbClient.getCachedChart(id)) {
         res.writeHead(401, { 'Content-Type': 'application/json' });
         return res.end(JSON.stringify({ error: 'Not logged in to USDB' }));
       }
       try {
-        const songData = await getUsdbSong(id);
+        const songData = await usdbClient.getUsdbSong(id);
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         return res.end(JSON.stringify(songData));
       } catch (err) {
         console.error('USDB get song error:', err);
         res.writeHead(500, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ error: err.message }));
+      }
+    }
+
+    // USDB Fuzzy Ground-Truth Matcher (MASTER_OVERHAUL_PLAN Phase 1)
+    if (pathname === '/api/usdb/match') {
+      const artist = (parsedUrl.searchParams.get('artist') || '').trim();
+      const title = (parsedUrl.searchParams.get('title') || '').trim();
+      const q = (parsedUrl.searchParams.get('q') || '').trim();
+      let queryArtist = artist;
+      let queryTitle = title;
+      if (!queryTitle && q) {
+        if (q.includes(' - ')) {
+          const parts = q.split(' - ');
+          queryArtist = parts[0].trim();
+          queryTitle = parts.slice(1).join(' - ').trim();
+        } else {
+          queryTitle = q;
+        }
+      }
+      try {
+        const resolvedMatch = await usdbClient.resolveUsdbSong(
+          { artist: queryArtist, title: queryTitle },
+          { searchYouTubeFn: (sq, sd) => searchYouTube(sq, sd) }
+        );
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        return res.end(JSON.stringify(resolvedMatch));
+      } catch (err) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
         return res.end(JSON.stringify({ error: err.message }));
       }
     }
@@ -842,6 +799,46 @@ const server = http.createServer(async (req, res) => {
       return res.end(JSON.stringify({ videos: combined }));
     }
 
+    // FFT Acoustic Cross-Correlation Alignment Endpoint (Phase 2)
+    if (pathname === '/api/sync/align-gap' && req.method === 'POST') {
+      try {
+        const data = await readRequestBody(req);
+        const { slug, ytAudioPath, refAudioPath, chartPath, updateChart, chartGapMs, method, maxDurationSec } = data;
+
+        let targetChartPath = chartPath;
+        let targetRefPath = refAudioPath;
+        let targetYtPath = ytAudioPath;
+
+        if (slug) {
+          const songDir = path.join(SONGS_DIR, slug);
+          if (!targetChartPath) {
+            const potentialTxt = path.join(songDir, 'song.txt');
+            if (fs.existsSync(potentialTxt)) targetChartPath = potentialTxt;
+          }
+          if (!targetRefPath) {
+            const potentialInst = path.join(songDir, 'instrumental.wav');
+            if (fs.existsSync(potentialInst)) targetRefPath = potentialInst;
+          }
+        }
+
+        const result = await audioSync.alignAudioGap({
+          ytAudioPath: targetYtPath,
+          refAudioPath: targetRefPath,
+          chartPath: targetChartPath,
+          chartGapMs: typeof chartGapMs === 'number' ? chartGapMs : undefined,
+          updateChart: !!updateChart,
+          method: method || 'hybrid',
+          maxDurationSec: typeof maxDurationSec === 'number' ? maxDurationSec : 120.0,
+        });
+
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        return res.end(JSON.stringify(result));
+      } catch (err) {
+        res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+        return res.end(JSON.stringify({ error: err.message }));
+      }
+    }
+
     // Return JSON 404 for any unmatched /api routes
     if (pathname.startsWith('/api/')) {
       res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -871,10 +868,17 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, () => {
-  const health = checkSystemHealth();
-  console.log(`🎤 Sing Karaoke Studio running at http://localhost:${PORT}`);
-  console.log(`   * yt-dlp: ${health.ytDlpAvailable ? '✓ ' + health.ytDlpPath : '✗ not found'}`);
-  console.log(`   * ffmpeg: ${health.ffmpegAvailable ? '✓ ' + health.ffmpegPath : '✗ not found'}`);
-  console.log(`   * Python venv: ${health.pythonVenvAvailable ? '✓ ready' : '✗ venv not found'}`);
-});
+if (require.main === module) {
+  server.listen(PORT, () => {
+    const health = checkSystemHealth();
+    console.log(`🎤 Sing Karaoke Studio running at http://localhost:${PORT}`);
+    console.log(`   * yt-dlp: ${health.ytDlpAvailable ? '✓ ' + health.ytDlpPath : '✗ not found'}`);
+    console.log(`   * ffmpeg: ${health.ffmpegAvailable ? '✓ ' + health.ffmpegPath : '✗ not found'}`);
+    console.log(`   * Python venv: ${health.pythonVenvAvailable ? '✓ ready' : '✗ venv not found'}`);
+  });
+}
+
+module.exports = {
+  server,
+  searchYouTube,
+};

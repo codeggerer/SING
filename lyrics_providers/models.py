@@ -18,11 +18,21 @@ class Syllable:
     joinNext: bool = False
     derived: bool = False
 
+    @property
+    def startTime(self) -> float:
+        return self.start
+
+    @property
+    def endTime(self) -> float:
+        return self.end
+
     def to_dict(self) -> Dict[str, Any]:
         d = {
             "text": self.text,
             "start": round(self.start, 3),
+            "startTime": round(self.start, 3),
             "end": round(self.end, 3),
+            "endTime": round(self.end, 3),
             "joinNext": self.joinNext,
         }
         if self.derived:
@@ -31,10 +41,13 @@ class Syllable:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "Syllable":
+        start_val = data.get("start") if data.get("start") is not None else data.get("startTime", data.get("t", 0.0))
+        end_val = data.get("end") if data.get("end") is not None else data.get("endTime", data.get("e", 0.0))
+        text_val = data.get("text") if data.get("text") is not None else data.get("words", data.get("s", ""))
         return cls(
-            text=str(data.get("text", "")),
-            start=float(data.get("start", 0.0)),
-            end=float(data.get("end", 0.0)),
+            text=str(text_val),
+            start=float(start_val),
+            end=float(end_val),
             joinNext=bool(data.get("joinNext", False)),
             derived=bool(data.get("derived", False)),
         )
@@ -48,12 +61,27 @@ class Line:
     words: str = ""
     syllables: List[Syllable] = field(default_factory=list)
 
+    @property
+    def startTime(self) -> float:
+        return self.start
+
+    @property
+    def endTime(self) -> float:
+        return self.end
+
+    @property
+    def text(self) -> str:
+        return self.words
+
     def to_dict(self) -> Dict[str, Any]:
         d: Dict[str, Any] = {
             "start": round(self.start, 3),
+            "startTime": round(self.start, 3),
             "end": round(self.end, 3),
+            "endTime": round(self.end, 3),
             "agent": self.agent,
             "words": self.words,
+            "text": self.words,
         }
         if self.syllables:
             d["syllables"] = [s.to_dict() for s in self.syllables]
@@ -61,26 +89,34 @@ class Line:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "Line":
-        sylls = [Syllable.from_dict(s) for s in data.get("syllables", [])]
+        start_val = data.get("start") if data.get("start") is not None else data.get("startTime", data.get("t", 0.0))
+        end_val = data.get("end") if data.get("end") is not None else data.get("endTime", data.get("e", 0.0))
+        words_val = data.get("words") if data.get("words") is not None else data.get("text", "")
+        sylls_data = data.get("syllables") if data.get("syllables") is not None else data.get("c", [])
+        sylls = [Syllable.from_dict(s) for s in (sylls_data or [])]
         return cls(
-            start=float(data.get("start", 0.0)),
-            end=float(data.get("end", 0.0)),
+            start=float(start_val),
+            end=float(end_val),
             agent=str(data.get("agent", "lead")),
-            words=str(data.get("words", "")),
+            words=str(words_val),
             syllables=sylls,
         )
 
 
 @dataclass
 class LyricsDoc:
-    source: str  # "spicylyrics" | "spotify" | "lrclib" | "whisper"
+    source: str  # "spicylyrics" | "spotify" | "lrclib" | "whisper" | "apple"
     syncType: str  # "syllable" | "word" | "line" | "static"
     language: str = "en"
     lines: List[Line] = field(default_factory=list)
     lyricsOffsetSec: float = 0.0
+    artist: str = ""
+    title: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return {
+            "artist": self.artist,
+            "title": self.title,
             "source": self.source,
             "syncType": self.syncType,
             "language": self.language,
@@ -100,6 +136,8 @@ class LyricsDoc:
             language=str(data.get("language", "en")),
             lines=lines,
             lyricsOffsetSec=float(data.get("lyricsOffsetSec", 0.0)),
+            artist=str(data.get("artist", "")),
+            title=str(data.get("title", "")),
         )
 
     @classmethod

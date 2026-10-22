@@ -49,7 +49,8 @@ MONOSYLLABLE_WORDS = {
     'herz', 'hand', 'kopf', 'welt', 'zeit', 'raum', 'lied', 'ton', 'klang', 'wort', 'sinn',
     'brand', 'wind', 'meer', 'see', 'hab', 'habs', 'hast', 'hat', 'hatte', 'bist', 'ist', 'sind',
     'warst', 'waren', 'gibt', 'gibts', 'nehm', 'nimmt', 'sag', 'sagt', 'denk', 'denkt', 'hör', 'hört',
-    'spiel', 'spielt', 'kann', 'kannst', 'muss', 'musst', 'will', 'willst', 'soll', 'sollt', 'darf', 'darfst'
+    'spiel', 'spielt', 'kann', 'kannst', 'muss', 'musst', 'will', 'willst', 'soll', 'sollt', 'darf', 'darfst',
+    'fahrn', "fahr'n", 'is', 'nich', 'nem', 'ner', 'gehts', "geht's", 'draussen'
 }
 
 
@@ -157,6 +158,57 @@ def split_syllables(word: str, lang: str = "de", word_duration: float = 0.5) -> 
     return res if res else [word]
 
 
+def expand_words_with_energy_syllables(
+    words: List[Dict[str, Any]],
+    vocal_audio: Optional[np.ndarray] = None,
+    sr: int = 16000,
+    lang: str = "de",
+    pitch_data: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Phase 2.1: Expands word-level timestamps into syllable-level notes
+    using RMS energy envelope tracking and spectral flux.
+    """
+    from karaoke.notes import energy_guided_syllable_split
+    expanded = []
+    for w in words:
+        if w.get("is_syllable", False):
+            expanded.append(w)
+        else:
+            raw_w = str(w.get("word") if "word" in w else w.get("text", ""))
+            s_s = float(w["start"])
+            s_e = max(float(w["end"]), s_s + 0.030)
+            sylls = energy_guided_syllable_split(
+                raw_w,
+                s_s,
+                s_e,
+                vocal_audio=vocal_audio,
+                sr=sr,
+                lang=lang,
+                pitch_data=pitch_data,
+                is_last_in_phrase=bool(w.get("line_break_after")),
+            )
+            for s_idx, s in enumerate(sylls):
+                item = {
+                    "word": s["word"],
+                    "text": s.get("text", s["word"]),
+                    "start": s["start"],
+                    "end": s["end"],
+                    "is_syllable": True,
+                }
+                if "agent" in w:
+                    item["agent"] = w["agent"]
+                if "probability" in w:
+                    item["probability"] = w["probability"]
+                if s_idx == len(sylls) - 1:
+                    if w.get("line_break_after"):
+                        item["line_break_after"] = True
+                    if w.get("pause_beat") is not None:
+                        item["pause_beat"] = w["pause_beat"]
+                expanded.append(item)
+    return expanded
+
+
 # ==============================================================================
 # 2. Canonical LyricsDoc Loading (Phase 2 Integration)
 # ==============================================================================
@@ -204,6 +256,15 @@ def load_canonical_lyrics(
             hardware_profile=hardware_profile,
         )
         detected_lang = doc.language or "en"
+        # Phase 2.1: Ensure any word-level provider notes are expanded to energy-guided syllables
+        if any(not w.get("is_syllable", False) for w in words):
+            v_audio = pitch_data.get("audio") if pitch_data else None
+            words = expand_words_with_energy_syllables(
+                words,
+                vocal_audio=v_audio,
+                lang=detected_lang,
+                pitch_data=pitch_data,
+            )
         print(f"✅ Verwende {len(words)} Provider-Noten/Wörter ({doc.syncType})")
         if progress_cb:
             progress_cb("lyrics", 1.0, f"Using {len(words)} provider syllables ({doc.syncType})")
@@ -224,10 +285,15 @@ def transcribe_lyrics(
     model_selection: Optional[ModelSelection] = None,
     stage_cache: Optional[StageCache] = None,
     progress_cb: Optional[Callable[[str, float, str], None]] = None,
+    artist: str = "",
+    title: str = "",
+    silence_threshold: float = 0.35,
+    initial_prompt: Optional[str] = None,
 ) -> Tuple[List[Dict[str, Any]], str]:
     """
-    Transcribes lyrics from vocal audio stem using Whisper and refines
-    timing via Phase 4 MMS forced alignment.
+    Transcribes lyrics from vocal audio stem using Breakthrough 1
+    Two-Step Whisper-to-MMS Decoupled Pipeline (0% attention timestamp reliance,
+    Meta MMS-FA CTC Trellis acoustic timing) with Phase 4 metadata conditioning.
     """
     # Check cache first
     if stage_cache:
@@ -243,6 +309,31 @@ def transcribe_lyrics(
         hardware_profile = detect_hardware()
     if model_selection is None:
         model_selection = select_models(hardware_profile)
+
+    try:
+        from karaoke.transcribe import transcribe_lyrics_two_step
+        return transcribe_lyrics_two_step(
+            vocals_path=vocals_path,
+            pitch_data=pitch_data,
+            hardware_profile=hardware_profile,
+            model_selection=model_selection,
+            stage_cache=stage_cache,
+            progress_cb=progress_cb,
+            artist=artist,
+            title=title,
+            silence_threshold=silence_threshold,
+            initial_prompt=initial_prompt,
+        )
+    except Exception as e:
+        print(f"⚠️ Two-Step Whisper-to-MMS Pipeline failed ({e}). Falling back to legacy Whisper...")
+
+    # Pre-filter vocals with Silero VAD (Phase 4.1 Zero Hallucinations)
+    clean_vocals_path = vocals_path
+    try:
+        from karaoke.vad import apply_vad_mask
+        clean_vocals_path = apply_vad_mask(vocals_path, silence_threshold=silence_threshold)
+    except Exception as e:
+        print(f"⚠️ Silero VAD pre-filtering failed ({e}), using raw vocals.")
 
     if progress_cb:
         progress_cb("lyrics", 0.1, f"Transcribing vocals using Whisper ({model_selection.whisper_model})...")
@@ -261,7 +352,7 @@ def transcribe_lyrics(
         print(f"🍏 Starte Apple MLX-Whisper Inferenz ({repo_id})...")
         try:
             result = mlx_whisper.transcribe(
-                str(vocals_path),
+                str(clean_vocals_path),
                 path_or_hf_repo=repo_id,
                 word_timestamps=True,
             )
@@ -309,11 +400,17 @@ def transcribe_lyrics(
         if model is None:
             raise RuntimeError(f"Konnte kein Faster-Whisper Modell initialisieren (versucht: {candidate_models}).")
 
+        prompt = initial_prompt
+        if prompt is None and (artist or title):
+            from karaoke.transcribe import build_whisper_initial_prompt
+            prompt = build_whisper_initial_prompt(artist=artist, title=title)
+
         print("🎙️ Transkribiere Gesang mit Wort-Timestamps...")
         segments, info = model.transcribe(
-            str(vocals_path),
+            str(clean_vocals_path),
+            initial_prompt=prompt,
             word_timestamps=True,
-            vad_filter=True,
+            vad_filter=False,
             condition_on_previous_text=False,
             beam_size=5,
         )
