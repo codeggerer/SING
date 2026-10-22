@@ -64,6 +64,16 @@ SPLIT_MAX_PLATEAU_STD_ST: float = 0.6    # Each plateau std-dev < 0.6 st
 SPLIT_TILDE_MIN_SEMITONE_DIFF: float = 1.0 # If tilde marker present, >= 1 st
 MIN_CORE_VOICED_FRAMES: int = 3          # Minimum voiced frames in core region
 
+# Issue #2 Hidden Semi-Markov Model (HSMM) / Viterbi Note Decoding
+HSMM_MIN_DWELL_SEC: float = 0.080        # Minimum note dwell time (80 ms) to suppress 5-6 Hz vibrato
+HSMM_SWITCH_COST: float = 10.0           # Transition cost to change note within syllable
+HSMM_JUMP_COST: float = 0.5              # Interval penalty per semitone of jump
+HSMM_SIGMA_ST: float = 0.6               # Emission tolerance in semitones
+HSMM_SCALE_PENALTY: float = 0.6          # Soft penalty for out-of-scale accidentals
+SPLIT_METHOD_HEURISTIC: str = "heuristic"
+SPLIT_METHOD_HSMM: str = "hsmm"
+DEFAULT_SPLIT_METHOD: str = SPLIT_METHOD_HEURISTIC
+
 # Phase 5 Scale Prior & Global Song Octave
 KEY_MIN_CONFIDENCE_FOR_SNAP: float = 0.60 # No snap when confidence < 0.6
 SCALE_SNAP_MAX_DEV_ST: float = 0.35      # Snap only if <= 0.35 st from scale tone

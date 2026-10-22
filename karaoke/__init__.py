@@ -22,7 +22,8 @@ from karaoke.pitch import (
     detect_key_from_pitch_histogram, detect_key_from_pitches,
     track_f0, clean_f0, analyze_vocal_pitch, _analyze_pitch_crepe, _analyze_pitch_pyin,
     get_syllable_pitch, detect_melisma_pitches, detect_syllable_split, mask_background_regions,
-    apply_harmonic_octave_continuity_filter
+    apply_harmonic_octave_continuity_filter,
+    viterbi_decode_notes_hsmm, detect_syllable_split_hsmm,
 )
 from karaoke.basicpitch_adapter import BasicPitchAdapter
 from karaoke.notes import (
@@ -143,6 +144,8 @@ __all__ = [
     "get_syllable_pitch",
     "detect_melisma_pitches",
     "detect_syllable_split",
+    "viterbi_decode_notes_hsmm",
+    "detect_syllable_split_hsmm",
     "mask_background_regions",
     "apply_harmonic_octave_continuity_filter",
     "BasicPitchAdapter",

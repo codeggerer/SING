@@ -32,7 +32,9 @@ from karaoke.config import (
     SPLIT_MAX_PLATEAU_STD_ST, SPLIT_TILDE_MIN_SEMITONE_DIFF,
     KEY_MIN_CONFIDENCE_FOR_SNAP, SCALE_SNAP_MAX_DEV_ST,
     PITCH_ENGINE_FCPE, PITCH_ENGINE_CREPE, PITCH_ENGINE_PYIN, PITCH_ENGINE_RMVPE,
+    SPLIT_METHOD_HEURISTIC, SPLIT_METHOD_HSMM, DEFAULT_SPLIT_METHOD,
 )
+from karaoke.hsmm import viterbi_decode_notes_hsmm, detect_syllable_split_hsmm
 
 # Krumhansl-Schmuckler Key Profiles
 MAJOR_PROFILE = np.array([6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88])
@@ -961,18 +963,30 @@ def detect_syllable_split(
     basic_pitch_notes: Optional[List[Dict[str, Any]]] = None,
     has_tilde: bool = False,
     fallback_pitch: float = 60.0,
+    method: str = "auto",
+    scale_pcs: Optional[Set[int]] = None,
 ) -> Optional[List[Tuple[float, float, float, int]]]:
     """
-    OVERHAUL_PLAN Phase 5.1: Restrict Melisma Splits (Fix for Spurious Double Tones).
-    Split ONLY if ALL of these hold:
-    - syllable duration >= 700 ms (or >= 350 ms if tilde or hyphen marker present),
-    - segment cleaned contour with change-point step detector (ruptures PELT). Both plateaus >= 250 ms,
-    - plateau medians differ by >= 2.5 semitones (or >= 1 st if tilde) and std-dev < 0.6 st each,
-    - Portamento / Scoop Filter: fit linear regression across syllable; if R^2 > 0.70 and monotonic glide, do not split,
-    - Basic Pitch agrees on the change when available.
+    Detect melisma pitch splits within a syllable window.
+    Supports:
+    - method="hsmm": Discrete-time note sequence optimization via Hidden Semi-Markov Model (Issue #2).
+    - method="heuristic": Change-point step detection via ruptures PELT (Phase 5.1).
+    - method="auto": Uses DEFAULT_SPLIT_METHOD.
     Returns:
-        [(s1, e1, float1, int1), (s2, e2, float2, int2)] or None.
+        List of (seg_start, seg_end, pitch_float, pitch_int) tuples or None.
     """
+    selected_method = DEFAULT_SPLIT_METHOD if method == "auto" else method
+    if selected_method == SPLIT_METHOD_HSMM:
+        return detect_syllable_split_hsmm(
+            pitch_data=pitch_data,
+            start_sec=start_sec,
+            end_sec=end_sec,
+            basic_pitch_notes=basic_pitch_notes,
+            has_tilde=has_tilde,
+            fallback_pitch=fallback_pitch,
+            scale_pcs=scale_pcs,
+        )
+
     dur = end_sec - start_sec
     min_dur = 0.35 if has_tilde else SPLIT_MIN_SYLLABLE_DUR_SEC
     if dur < min_dur:

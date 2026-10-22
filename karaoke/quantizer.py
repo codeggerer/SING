@@ -27,7 +27,10 @@ from karaoke.config import (
     BEAT_DUR_SEC,
     MIN_NOTE_DUR_BEATS,
     MIN_NOTE_GAP_BEATS,
+    DEFAULT_SPLIT_METHOD,
+    SPLIT_METHOD_HSMM,
 )
+from karaoke.hsmm import viterbi_decode_notes_hsmm
 
 # Krumhansl-Schmuckler cognitive key profiles (energy distribution)
 MAJOR_PROFILE = np.array([6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88])
@@ -269,6 +272,55 @@ def detect_melisma_in_syllable(
         )
 
     return None
+
+
+def detect_melisma_in_syllable_hsmm(
+    midi_slice: np.ndarray,
+    conf_slice: np.ndarray,
+    rms_slice: np.ndarray,
+    start_sec: float,
+    end_sec: float,
+    frame_dur: float = 0.010,
+    scale_pcs: Optional[Set[int]] = None,
+    has_melisma_marker: bool = False,
+) -> Optional[List[Tuple[float, float, float, int]]]:
+    """
+    Decodes multi-note melismas or vocal runs via HSMM Viterbi optimization (Issue #2).
+    """
+    dur = end_sec - start_sec
+    if dur < 0.160 and not has_melisma_marker:
+        return None
+
+    effective_dwell = 0.060 if has_melisma_marker else 0.080
+    effective_switch = 7.0 if has_melisma_marker else 10.0
+
+    raw_segs = viterbi_decode_notes_hsmm(
+        midis=midi_slice,
+        confs=conf_slice,
+        rms=rms_slice,
+        frame_dur_sec=frame_dur,
+        min_dwell_sec=effective_dwell,
+        switch_cost=effective_switch,
+        jump_cost=0.5,
+        sigma_semitones=0.6,
+        scale_pcs=scale_pcs,
+        scale_penalty=0.6,
+        fallback_pitch=60.0,
+        filter_scoops=True,
+    )
+
+    if len(raw_segs) <= 1:
+        return None
+
+    result = []
+    for s_frame, e_frame, pf, pi in raw_segs:
+        t0 = round(start_sec + s_frame * frame_dur, 3)
+        t1 = round(start_sec + e_frame * frame_dur, 3)
+        result.append((t0, t1, pf, pi))
+
+    result[0] = (start_sec, result[0][1], result[0][2], result[0][3])
+    result[-1] = (result[-1][0], end_sec, result[-1][2], result[-1][3])
+    return result
 
 
 def quantize_syllable_notes_in_key(
@@ -609,50 +661,63 @@ def quantize_notes(
         c_slice = conf[sf_idx:ef_idx]
         r_slice = rms[sf_idx:ef_idx]
 
-        # Check for melisma split
-        melisma_res = detect_melisma_in_syllable(
-            m_slice,
-            c_slice,
-            r_slice,
-            note_start,
-            w_end,
-            frame_dur,
-            min_split_dur=0.35 if has_melisma_marker else 0.55,
-            min_semitone_diff=1.4 if has_melisma_marker else 1.8,
-        )
+        # Check for melisma split (HSMM or Heuristic)
+        melisma_segs = None
+        if DEFAULT_SPLIT_METHOD == SPLIT_METHOD_HSMM:
+            melisma_segs = detect_melisma_in_syllable_hsmm(
+                m_slice,
+                c_slice,
+                r_slice,
+                note_start,
+                w_end,
+                frame_dur=frame_dur,
+                scale_pcs=scale_pcs,
+                has_melisma_marker=has_melisma_marker,
+            )
+        else:
+            melisma_res = detect_melisma_in_syllable(
+                m_slice,
+                c_slice,
+                r_slice,
+                note_start,
+                w_end,
+                frame_dur,
+                min_split_dur=0.35 if has_melisma_marker else 0.55,
+                min_semitone_diff=1.4 if has_melisma_marker else 1.8,
+            )
+            if melisma_res:
+                t_split, p1_f, p1_i, p2_f, p2_i, _ = melisma_res
+                melisma_segs = [
+                    (note_start, t_split, p1_f, p1_i),
+                    (t_split, w_end, p2_f, p2_i),
+                ]
 
-        if melisma_res:
-            t_split, p1_f, p1_i, p2_f, p2_i, _ = melisma_res
-            split_frame = max(sf_idx + 1, min(ef_idx - 1, int(t_split / frame_dur)))
+        if melisma_segs and len(melisma_segs) >= 2:
             clean_word = raw_word.rstrip("~").rstrip("-").rstrip(" ")
-
-            item1 = {
-                "start": w_start,
-                "note_start": note_start,
-                "end": t_split,
-                "text": f"{clean_word}-",
-                "midi": midi_float[sf_idx:split_frame],
-                "conf": conf[sf_idx:split_frame],
-                "rms": rms[sf_idx:split_frame],
-                "is_phrase_break": is_phrase_break,
-                "pause_beat": pause_beat,
-                "fallback_pitch": p1_f,
-            }
-            item2 = {
-                "start": t_split,
-                "note_start": t_split,
-                "end": w_end,
-                "text": "~ ",
-                "midi": midi_float[split_frame:ef_idx],
-                "conf": conf[split_frame:ef_idx],
-                "rms": rms[split_frame:ef_idx],
-                "is_phrase_break": False,
-                "pause_beat": None,
-                "fallback_pitch": p2_f,
-            }
+            items = []
             s_idx_start = len(syllable_items)
-            syllable_items.extend([item1, item2])
-            word_indices.append((s_idx_start, 2))
+
+            for m_idx, (t0, t1, pf, pi) in enumerate(melisma_segs):
+                m_sf = max(sf_idx, min(total_frames - 1, int(t0 / frame_dur)))
+                m_ef = max(m_sf + 1, min(total_frames, int(t1 / frame_dur)))
+                is_first = (m_idx == 0)
+                n_start = note_start if is_first else t0
+                txt = f"{clean_word}-" if is_first else "~ "
+                items.append({
+                    "start": w_start if is_first else t0,
+                    "note_start": n_start,
+                    "end": t1,
+                    "text": txt,
+                    "midi": midi_float[m_sf:m_ef],
+                    "conf": conf[m_sf:m_ef],
+                    "rms": rms[m_sf:m_ef],
+                    "is_phrase_break": is_phrase_break if is_first else False,
+                    "pause_beat": pause_beat if is_first else None,
+                    "fallback_pitch": pf,
+                })
+
+            syllable_items.extend(items)
+            word_indices.append((s_idx_start, len(items)))
         else:
             item = {
                 "start": w_start,

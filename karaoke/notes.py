@@ -389,7 +389,7 @@ def build_word_notes(
                 note_s = compute_vowel_nucleus_onset(raw_word, w_start, w_end, char_spans=w.get("char_spans"), pitch_data=pitch_data)
             note_s = max(w_start, min(note_s, w_end - 0.030))
 
-            # Check for deliberate melisma split on long syllables (>= 700ms)
+            # Check for deliberate melisma split on long syllables (>= 700ms) or rapid runs via HSMM
             melisma = detect_syllable_split(
                 pitch_data,
                 note_s,
@@ -397,15 +397,23 @@ def build_word_notes(
                 basic_pitch_notes=basic_pitch_notes,
                 has_tilde=has_tilde_marker,
                 fallback_pitch=prev_pitch_float,
+                method="auto",
             )
-            if melisma:
-                (t0, t1, pf1, pi1), (t2, t3, pf2, pi2) = melisma[0], melisma[1]
-                prev_pitch_float = pf2
+            if melisma and len(melisma) >= 2:
                 clean_text = raw_word.rstrip('~').rstrip('-').rstrip(' ')
-                raw_notes = [
-                    {"start": t0, "note_start": note_s, "end": t1, "pitch": pi1, "pitch_float": pf1, "text": f"{clean_text}-"},
-                    {"start": t2, "note_start": t2, "end": t3, "pitch": pi2, "pitch_float": pf2, "text": "~ "},
-                ]
+                raw_notes = []
+                for m_idx, (t0, t1, pf, pi) in enumerate(melisma):
+                    n_start = note_s if m_idx == 0 else t0
+                    txt = f"{clean_text}-" if m_idx == 0 else "~ "
+                    raw_notes.append({
+                        "start": t0,
+                        "note_start": n_start,
+                        "end": t1,
+                        "pitch": pi,
+                        "pitch_float": pf,
+                        "text": txt,
+                    })
+                prev_pitch_float = melisma[-1][2]
             else:
                 s_float, s_pitch = get_syllable_pitch(pitch_data, note_s, w_end, fallback_pitch=prev_pitch_float, return_float=True)
                 prev_pitch_float = s_float
@@ -437,13 +445,22 @@ def build_word_notes(
                 basic_pitch_notes=basic_pitch_notes,
                 has_tilde=has_tilde_marker,
                 fallback_pitch=prev_pitch_float,
+                method="auto",
             )
-            if melisma:
-                (t0, t1, pf1, pi1), (t2, t3, pf2, pi2) = melisma[0], melisma[1]
-                prev_pitch_float = pf2
+            if melisma and len(melisma) >= 2:
                 clean_text = syll_dicts[0]['word'].strip().rstrip('-').rstrip('~')
-                raw_notes.append({"start": t0, "note_start": note_s, "end": t1, "pitch": pi1, "pitch_float": pf1, "text": f"{clean_text}-"})
-                raw_notes.append({"start": t2, "note_start": t2, "end": t3, "pitch": pi2, "pitch_float": pf2, "text": "~ "})
+                for m_idx, (t0, t1, pf, pi) in enumerate(melisma):
+                    n_start = note_s if m_idx == 0 else t0
+                    txt = f"{clean_text}-" if m_idx == 0 else "~ "
+                    raw_notes.append({
+                        "start": t0,
+                        "note_start": n_start,
+                        "end": t1,
+                        "pitch": pi,
+                        "pitch_float": pf,
+                        "text": txt,
+                    })
+                prev_pitch_float = melisma[-1][2]
             else:
                 p_float, p_int = get_syllable_pitch(pitch_data, note_s, w_end, fallback_pitch=prev_pitch_float, return_float=True)
                 prev_pitch_float = p_float
