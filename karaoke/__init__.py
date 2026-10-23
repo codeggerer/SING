@@ -31,7 +31,7 @@ from karaoke.notes import (
     apply_subharmonic_recovery, apply_scale_snapping, energy_guided_syllable_split,
 )
 from karaoke.chart import (
-    detect_display_bpm, generate_ultrastar_chart
+    detect_display_bpm, detect_song_rhythm, generate_ultrastar_chart
 )
 from karaoke.pipeline import (
     KaraokeJob, run
@@ -106,6 +106,12 @@ from karaoke.transients import (
     snap_syllables_to_transients,
     compute_transient_onset_envelope,
 )
+from karaoke.rhythm import (
+    RhythmGrid,
+    track_song_rhythm,
+    snap_onset_to_grid,
+    snap_notes_to_beat_grid,
+)
 
 __all__ = [
     "KaraokeJob",
@@ -155,6 +161,7 @@ __all__ = [
     "apply_subharmonic_recovery",
     "apply_scale_snapping",
     "detect_display_bpm",
+    "detect_song_rhythm",
     "generate_ultrastar_chart",
     "USTAR_BPM",
     "BEAT_DUR_SEC",
@@ -205,4 +212,8 @@ __all__ = [
     "snap_word_onsets_to_transients",
     "snap_syllables_to_transients",
     "compute_transient_onset_envelope",
+    "RhythmGrid",
+    "track_song_rhythm",
+    "snap_onset_to_grid",
+    "snap_notes_to_beat_grid",
 ]

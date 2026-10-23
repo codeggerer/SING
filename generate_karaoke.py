@@ -60,10 +60,15 @@ from karaoke import (
     apply_subharmonic_recovery,
     apply_scale_snapping,
     detect_display_bpm,
+    detect_song_rhythm,
     generate_ultrastar_chart,
     USTAR_BPM,
     BEAT_DUR_SEC,
     GAP,
+    RhythmGrid,
+    track_song_rhythm,
+    snap_onset_to_grid,
+    snap_notes_to_beat_grid,
     load_silero_vad,
     detect_vocal_intervals,
     extract_speech_timestamps,
@@ -120,6 +125,15 @@ def main():
                         help="Silero VAD Schwellenwert für Sprachaktivität (Phase 4.1)")
     parser.add_argument("--initial-prompt", default=None,
                         help="Whisper initial_prompt für Metadaten-Konditionierung (Phase 4.2)")
+    # Issue #4 Musical Meter & Beat Grid Quantization:
+    parser.add_argument("--bpm-mode", choices=["millisecond", "native", "native_highres"], default="millisecond",
+                        help="UltraStar BPM Modus: millisecond (1500 BPM / 10ms) oder native (#BPM:<real_bpm> mit #GAP)")
+    parser.add_argument("--native-bpm", action="store_true", default=False,
+                        help="UltraStar Chart mit nativem Song-BPM und #GAP statt Millisekunden-Grid ausgeben")
+    parser.add_argument("--no-grid-snap", action="store_true", default=False,
+                        help="Soft Beat-Grid Quantisierung deaktivieren")
+    parser.add_argument("--snap-tolerance", type=float, default=0.030,
+                        help="Toleranzfenster für Beat-Grid Snapping in Sekunden (Standard: 0.030 = 30ms)")
 
     args = parser.parse_args()
 
@@ -132,6 +146,8 @@ def main():
         sys.exit(1)
 
     override_device = None if args.device == "auto" else args.device
+    bpm_mode = "native" if args.native_bpm else args.bpm_mode
+    snap_grid = not args.no_grid_snap
 
     job = KaraokeJob(
         input_audio=audio_path,
@@ -152,6 +168,9 @@ def main():
         debug_dir=args.debug_dir,
         silence_threshold=args.silence_threshold,
         initial_prompt=args.initial_prompt,
+        bpm_mode=bpm_mode,
+        snap_grid=snap_grid,
+        snap_tolerance_sec=args.snap_tolerance,
     )
 
     if args.json_progress:

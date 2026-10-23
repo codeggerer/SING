@@ -19,7 +19,8 @@ from karaoke.separate import separate_stems
 from karaoke.lyrics_io import load_canonical_lyrics, transcribe_lyrics
 from karaoke.pitch import analyze_vocal_pitch, detect_song_key, mask_background_regions
 from karaoke.basicpitch_adapter import BasicPitchAdapter
-from karaoke.chart import detect_display_bpm, generate_ultrastar_chart
+from karaoke.chart import detect_display_bpm, detect_song_rhythm, generate_ultrastar_chart
+from karaoke.rhythm import RhythmGrid
 from karaoke.debug_export import export_debug_artifacts
 
 
@@ -43,6 +44,9 @@ class KaraokeJob:
     debug_dir: Optional[Path | str] = None
     silence_threshold: float = 0.35
     initial_prompt: Optional[str] = None
+    bpm_mode: str = "millisecond"
+    snap_grid: bool = True
+    snap_tolerance_sec: float = 0.030
 
 
 def run(
@@ -107,8 +111,10 @@ def run(
         progress_cb=sep_progress,
     )
 
-    # Step 2: Display BPM (fast)
-    display_bpm = detect_display_bpm(str(audio_path))
+    # Step 2: Song Rhythm & Meter Tracking (Issue #4)
+    rhythm_source = instrumental_file if instrumental_file.exists() else audio_path
+    rhythm_grid = detect_song_rhythm(rhythm_source)
+    display_bpm = int(round(rhythm_grid.bpm))
 
     # Step 3: Key Detection & Pitch Analysis (weight: 0.40 -> 0.65)
     def pitch_progress(s, sub_frac, m):
@@ -222,6 +228,11 @@ def run(
         basic_pitch_notes=bp_notes,
         return_word_notes=True,
         vocals_path=vocals_file,
+        rhythm_grid=rhythm_grid,
+        bpm_mode=job.bpm_mode,
+        snap_grid=job.snap_grid,
+        snap_tolerance_sec=job.snap_tolerance_sec,
+        instrumental_path=instrumental_file,
     )
 
     # Optional: Debug Artifact Export (contour.png and report.json, PLAN.md Phase 7.3)
@@ -264,6 +275,7 @@ def run(
         "language": detected_lang,
         "lyrics_source": lyrics_source,
         "display_bpm": display_bpm,
+        "rhythm": rhythm_grid.to_dict() if rhythm_grid else {"bpm": display_bpm, "bpm_mode": job.bpm_mode},
         "key": key_info["key"] if key_info else "Unknown",
         "hardware": hw.to_dict(),
         "models_used": models.to_dict(),

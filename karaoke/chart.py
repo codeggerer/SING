@@ -18,30 +18,27 @@ from karaoke.config import (
 from karaoke.notes import (
     sec_to_beat, build_word_notes, apply_global_octave_tessitura, apply_subharmonic_recovery, apply_scale_snapping
 )
+from karaoke.rhythm import (
+    RhythmGrid, track_song_rhythm, snap_notes_to_beat_grid
+)
+
+
+def detect_song_rhythm(
+    audio_path: Path | str,
+    instrumental_path: Optional[Path | str] = None,
+) -> RhythmGrid:
+    """Estimates musical tempo, beat grid, and downbeat phase using librosa beat tracking."""
+    target = instrumental_path if (instrumental_path and Path(instrumental_path).exists()) else audio_path
+    return track_song_rhythm(target)
 
 
 def detect_display_bpm(audio_path: Path | str) -> int:
     """Estimates musical display BPM using librosa beat tracking."""
     print("📊 Berechne Display-BPM mit Librosa...")
-    if librosa is None:
-        return 120
-    try:
-        y, sr = librosa.load(str(audio_path), sr=22050, duration=90)
-        tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
-        if hasattr(tempo, '__iter__'):
-            tempo_val = float(tempo[0])
-        else:
-            tempo_val = float(tempo)
-        if tempo_val < 65:
-            tempo_val *= 2
-        elif tempo_val > 190:
-            tempo_val /= 2
-        display_bpm = int(round(tempo_val))
-        print(f"✅ Geschätztes Song-Tempo für Anzeige: {display_bpm} BPM")
-        return display_bpm
-    except Exception as e:
-        print(f"⚠️ BPM-Schätzung fehlgeschlagen ({e}), Standard 120 BPM.")
-        return 120
+    grid = detect_song_rhythm(audio_path)
+    display_bpm = int(round(grid.bpm))
+    print(f"✅ Geschätztes Song-Tempo für Anzeige: {display_bpm} BPM (Confidence: {grid.confidence:.2f}, GAP: {grid.gap_ms} ms)")
+    return display_bpm
 
 
 def generate_ultrastar_chart(
@@ -57,15 +54,30 @@ def generate_ultrastar_chart(
     return_word_notes: bool = False,
     vocals_path: Optional[Path | str] = None,
     speech_timestamps: Optional[List[Dict[str, float]]] = None,
+    rhythm_grid: Optional[RhythmGrid] = None,
+    bpm_mode: str = "millisecond",
+    snap_grid: bool = True,
+    snap_tolerance_sec: float = 0.030,
+    instrumental_path: Optional[Path | str] = None,
 ) -> Path | Tuple[Path, List[Dict[str, Any]]]:
     """
     Builds and writes a complete UltraStar TXT score chart file.
+    Supports soft musical beat grid snapping and configurable BPM modes (millisecond or native).
     """
     print("\n" + "=" * 65)
     print("[4/4] 🎵 Erstellung der UltraStar TXT Datei mit Tonleiter & Oktav-Korrektur")
     print("=" * 65)
 
     output_txt_path = Path(output_txt_path).resolve()
+
+    # Track song rhythm if not provided and grid snapping or native BPM is requested
+    if rhythm_grid is None and (snap_grid or bpm_mode != "millisecond"):
+        audio_src = instrumental_path or vocals_path
+        if audio_src and Path(audio_src).exists():
+            try:
+                rhythm_grid = detect_song_rhythm(audio_src)
+            except Exception as e:
+                print(f"⚠️ Rhythm tracking failed ({e}), continuing without grid.")
 
     # Apply Silero VAD acoustic breath breaks & hallucination filtering (Breakthrough 2)
     if speech_timestamps or vocals_path:
@@ -79,12 +91,35 @@ def generate_ultrastar_chart(
         except Exception as e:
             print(f"⚠️ Silero VAD breath break application failed ({e}), continuing with existing words.")
 
+    # Configure timing resolution & header based on bpm_mode
+    if bpm_mode == "native" and rhythm_grid is not None:
+        chart_bpm = float(display_bpm)
+        chart_gap = int(round(rhythm_grid.gap_ms))
+        beat_dur_sec = 15.0 / chart_bpm
+        gap_sec = chart_gap / 1000.0
+        min_note_dur_beats = 1
+        min_note_gap_beats = 1
+    elif bpm_mode == "native_highres" and rhythm_grid is not None:
+        chart_bpm = float(display_bpm * 4)
+        chart_gap = int(round(rhythm_grid.gap_ms))
+        beat_dur_sec = 15.0 / chart_bpm
+        gap_sec = chart_gap / 1000.0
+        min_note_dur_beats = 2
+        min_note_gap_beats = 1
+    else:  # "millisecond" fallback mode
+        chart_bpm = USTAR_BPM
+        chart_gap = GAP
+        beat_dur_sec = BEAT_DUR_SEC
+        gap_sec = GAP / 1000.0
+        min_note_dur_beats = MIN_NOTE_DUR_BEATS
+        min_note_gap_beats = MIN_NOTE_GAP_BEATS
+
     ultrastar_lines = []
     ultrastar_lines.append(f"#TITLE:{title}")
     ultrastar_lines.append(f"#ARTIST:{artist}")
-    ultrastar_lines.append(f"#BPM:{USTAR_BPM}")
+    ultrastar_lines.append(f"#BPM:{int(chart_bpm) if chart_bpm.is_integer() else round(chart_bpm, 2)}")
     ultrastar_lines.append(f"#REALBPM:{display_bpm}")
-    ultrastar_lines.append(f"#GAP:{GAP}")
+    ultrastar_lines.append(f"#GAP:{chart_gap}")
     ultrastar_lines.append(f"#LANGUAGE:{lang.upper()}")
     ultrastar_lines.append(f"#GENRE:{DEFAULT_GENRE}")
     if key_info and "key" in key_info:
@@ -117,12 +152,27 @@ def generate_ultrastar_chart(
     # Pass 3: Soft Scale Snapping (In-Key Tuning)
     apply_scale_snapping(word_notes_list, scale_pcs, confidence=key_confidence)
 
+    # Pass 3.5: Soft Beat Grid Quantization (Issue #4)
+    if snap_grid and rhythm_grid is not None:
+        snap_notes_to_beat_grid(
+            word_notes_list,
+            rhythm_grid,
+            tolerance_sec=snap_tolerance_sec,
+        )
+
     # Pass 4: Syllable Formatting, Note Preservation & Word Spacing
     last_end_beat = 0
     for wn in word_notes_list:
         if wn["pause_beat"] is not None:
-            ultrastar_lines.append(f"- {wn['pause_beat']}")
-            last_end_beat = max(last_end_beat, wn["pause_beat"])
+            if bpm_mode in ("native", "native_highres") and rhythm_grid is not None:
+                p_sec = wn.get("pause_sec")
+                if p_sec is None:
+                    p_sec = wn["pause_beat"] * BEAT_DUR_SEC
+                p_beat = max(last_end_beat + 1, int(round((p_sec - gap_sec) / beat_dur_sec)))
+            else:
+                p_beat = wn["pause_beat"]
+            ultrastar_lines.append(f"- {p_beat}")
+            last_end_beat = max(last_end_beat, p_beat)
 
         # Note Preservation Rule:
         # Multi-syllable words (num_sylls > 1) MUST PRESERVE each distinct syllable note
@@ -145,18 +195,20 @@ def generate_ultrastar_chart(
         for note_idx, note in enumerate(active_notes):
             s_pitch = note["pitch"]
             note_start_sec = float(note.get("note_start", note["start"]))
-            s_beat = sec_to_beat(note_start_sec)
-            e_beat = sec_to_beat(note["end"])
+            note_end_sec = float(note["end"])
 
-            # Resolve overlaps only: guarantee at least MIN_NOTE_GAP_BEATS (1 beat = 10 ms)
-            if last_end_beat > 0 and s_beat < last_end_beat + MIN_NOTE_GAP_BEATS:
-                s_beat = last_end_beat + MIN_NOTE_GAP_BEATS
+            s_beat = int(round((note_start_sec - gap_sec) / beat_dur_sec))
+            e_beat = int(round((note_end_sec - gap_sec) / beat_dur_sec))
 
-            # Minimum duration: MIN_NOTE_DUR_BEATS (3 beats = 30 ms)
-            if e_beat < s_beat + MIN_NOTE_DUR_BEATS:
-                e_beat = s_beat + MIN_NOTE_DUR_BEATS
+            # Resolve overlaps only: guarantee at least min_note_gap_beats
+            if last_end_beat > 0 and s_beat < last_end_beat + min_note_gap_beats:
+                s_beat = last_end_beat + min_note_gap_beats
 
-            d_beat = max(MIN_NOTE_DUR_BEATS, e_beat - s_beat)
+            # Minimum duration: min_note_dur_beats
+            if e_beat < s_beat + min_note_dur_beats:
+                e_beat = s_beat + min_note_dur_beats
+
+            d_beat = max(min_note_dur_beats, e_beat - s_beat)
             last_end_beat = s_beat + d_beat
 
             ultrastar_lines.append(f": {s_beat} {d_beat} {s_pitch} {note['text']}")
