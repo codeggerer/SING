@@ -53,6 +53,7 @@ const DEFAULT_SETTINGS = {
   stageLayout: 'backdrop',       // Stage layout mode ('split' | 'backdrop' | 'theater')
   backdropHighwayHeight: '100',  // Height of transparent highway box in backdrop mode ('25' | '33' | '50' | '100')
   highwayBackdropOpacity: 65,    // Darkness opacity for highway backdrop (15-95%)
+  highwayBackdropBlur: true,     // Frosted glass blur effect for highway backdrop
   playheadColor: 'cyan',         // Playhead laser color ('cyan' | 'gold' | 'emerald' | 'white' | 'magenta')
 
   // Audio & Mixing
@@ -354,9 +355,11 @@ function applySettings(newSettings, shouldSave = true) {
 
   const opacityVal = typeof s.highwayBackdropOpacity === 'number' ? s.highwayBackdropOpacity : 65;
   document.documentElement.style.setProperty('--highway-backdrop-opacity', (opacityVal / 100).toFixed(2));
-  document.documentElement.style.setProperty('--highway-backdrop-blur', '8px');
+  const isHighwayBlur = s.highwayBackdropBlur !== false;
+  document.documentElement.style.setProperty('--highway-backdrop-blur', isHighwayBlur ? '8px' : '0px');
   setVal('sliderHighwayOpacity', opacityVal);
   setText('lblHighwayOpacityVal', `${opacityVal}%`);
+  setChecked('toggleHighwayBlur', isHighwayBlur);
 
   const playheadCol = s.playheadColor || 'cyan';
   setVal('selectPlayheadColor', playheadCol);
@@ -719,6 +722,13 @@ function bindUIEvents() {
     });
   }
 
+  const toggleHighwayBlur = document.getElementById('toggleHighwayBlur');
+  if (toggleHighwayBlur) {
+    toggleHighwayBlur.addEventListener('change', (e) => {
+      applySettings({ highwayBackdropBlur: e.target.checked });
+    });
+  }
+
   const selPlayheadColor = document.getElementById('selectPlayheadColor');
   if (selPlayheadColor) {
     selPlayheadColor.addEventListener('change', (e) => {
@@ -907,6 +917,11 @@ function bindUIEvents() {
   const btnStartGeneration = document.getElementById('btnStartGeneration');
   if (btnStartGeneration) {
     btnStartGeneration.addEventListener('click', () => handleStartSongAction());
+  }
+
+  const btnSeparateVocals = document.getElementById('btnSeparateVocals');
+  if (btnSeparateVocals) {
+    btnSeparateVocals.addEventListener('click', () => handleStartSongAction({ forceSeparation: true, forceJob: true }));
   }
 
   const btnUpgradeLyrics = document.getElementById('btnUpgradeLyrics');
@@ -5902,6 +5917,7 @@ function displayResolvePreview(resolved) {
 
 function updateStartBtnLabel() {
   const startBtn = document.getElementById('btnStartGeneration');
+  const separateBtn = document.getElementById('btnSeparateVocals');
   if (!startBtn || !state.resolvedTrack) return;
   const hasCustomLyrics = !!(state.customLyricsText && state.customLyricsText.trim());
   const isCatalog =
@@ -5909,6 +5925,15 @@ function updateStartBtnLabel() {
     (findCatalogMatch(state.resolvedTrack) ||
       (state.resolvedTrack.usdbMatch && state.resolvedTrack.usdbMatch.matched));
   startBtn.textContent = isCatalog ? 'Sing Now (Instant)' : 'Generate Karaoke';
+  if (separateBtn) {
+    if (isCatalog) {
+      separateBtn.classList.remove('hidden');
+      separateBtn.style.display = 'inline-flex';
+    } else {
+      separateBtn.classList.add('hidden');
+      separateBtn.style.display = 'none';
+    }
+  }
 }
 
 function findCatalogMatch(resolved) {
@@ -6002,9 +6027,10 @@ async function handleStartSongAction(actionOptions = {}) {
   // 1. Check if song exists in curated UltraStar catalog or USDB ground truth (MASTER_OVERHAUL_PLAN Phase 1)
   const hasCustomLyrics = !!(state.customLyricsText && state.customLyricsText.trim());
   const isUpgrade = !!actionOptions.upgradeLyrics;
-  const catMatch = !hasCustomLyrics && !isUpgrade ? findCatalogMatch(state.resolvedTrack) : null;
-  const usdbM = !hasCustomLyrics && !isUpgrade ? state.resolvedTrack.usdbMatch : null;
-  if (catMatch || (usdbM && usdbM.matched)) {
+  const forceJob = !!actionOptions.forceJob || !!actionOptions.forceSeparation;
+  const catMatch = !hasCustomLyrics && !isUpgrade && !forceJob ? findCatalogMatch(state.resolvedTrack) : null;
+  const usdbM = !hasCustomLyrics && !isUpgrade && !forceJob ? state.resolvedTrack.usdbMatch : null;
+  if (!forceJob && (catMatch || (usdbM && usdbM.matched))) {
     const matchId = catMatch?.id || usdbM?.id || usdbM?.usdbId;
     const matchTitle = catMatch?.title || usdbM?.title || state.resolvedTrack.title;
     const matchArtist = catMatch?.artist || usdbM?.artist || state.resolvedTrack.artist;
@@ -6067,7 +6093,7 @@ async function handleStartSongAction(actionOptions = {}) {
         (s.youtubeId && s.youtubeId === state.resolvedTrack.youtubeId) ||
         (s.slug && s.slug === state.resolvedTrack.slug)
     );
-    if (libMatch) {
+    if (libMatch && (!forceJob || (libMatch.hasVocals && libMatch.hasInstrumental))) {
       state.lastGeneratedSong = libMatch;
       updateGenerationUI({
         status: 'done',

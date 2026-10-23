@@ -6,7 +6,8 @@
   "private": true,
   "scripts": {
     "start": "node server.js",
-    "test": "node tests/usdb_client_test.js && node tests/sync_test.js && node tests/resolver_test.js && node tests/jobs_test.js && node tests/settings_test.js && node tests/stem_mixer_test.js && node tests/pitch_tracking_test.js && node tests/highway_rendering_test.js && node tests/stage_arena_test.js && node tests/chart_editor_test.js && node tests/calibration_test.js && node tests/robustness_test.js && node tests/engine_test.js && node tests/test_lyrics.js && node tests/test_lyrics_harvester.js && node tests/phase5_paste_lyrics_test.js && node tests/tier2_precision_test.js && node tests/tier_consistency_phase5_test.js",
+    "test": "node tests/usdb_client_test.js && node tests/sync_test.js && node tests/resolver_test.js && node tests/jobs_test.js && node tests/settings_test.js && node tests/stem_mixer_test.js && node tests/pitch_tracking_test.js && node tests/highway_rendering_test.js && node tests/stage_arena_test.js && node tests/chart_editor_test.js && node tests/calibration_test.js && node tests/robustness_test.js && node tests/engine_test.js && node tests/test_lyrics.js && node tests/test_lyrics_harvester.js && node tests/phase5_paste_lyrics_test.js && node tests/tier2_precision_test.js && node tests/tier_consistency_phase5_test.js && node tests/issue_fixes_test.js",
+    "test:issues": "node tests/issue_fixes_test.js",
     "test:phase5_tier": "node tests/tier_consistency_phase5_test.js",
     "test:tier2": "node tests/tier2_precision_test.js",
     "test:phase5": "node tests/phase5_paste_lyrics_test.js",

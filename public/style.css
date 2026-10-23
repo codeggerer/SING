@@ -2231,6 +2231,28 @@ body.hide-score-hud .score-hud {
   font-weight: 700;
 }
 
+.isolate-stems-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 20px;
+  font-size: 0.95rem;
+  font-weight: 600;
+  border-radius: var(--radius-sm);
+  background: rgba(168, 85, 247, 0.16);
+  border: 1px solid rgba(168, 85, 247, 0.45);
+  color: #c084fc;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.isolate-stems-btn:hover {
+  background: rgba(168, 85, 247, 0.28);
+  border-color: rgba(168, 85, 247, 0.8);
+  color: #f3e8ff;
+  box-shadow: 0 0 16px rgba(168, 85, 247, 0.35);
+}
+
 /* Generation Progress Card */
 .gen-progress-card {
   max-width: 680px;

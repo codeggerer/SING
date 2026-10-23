@@ -46,6 +46,7 @@ const requiredElementIds = [
   'chkEchoCancel',
   'toggleOctaveAgnostic',
   'selectSettingsDifficulty',
+  'toggleHighwayBlur',
 ];
 
 for (const id of requiredElementIds) {
@@ -85,6 +86,7 @@ const expectedKeys = [
   'difficulty',
   'octaveAgnostic',
   'latencyMs',
+  'highwayBackdropBlur',
 ];
 
 for (const key of expectedKeys) {

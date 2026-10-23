@@ -101,6 +101,9 @@
           <button id="btnStartGeneration" class="primary-btn gen-submit-btn">
             Sing Now
           </button>
+          <button id="btnSeparateVocals" class="secondary-btn isolate-stems-btn hidden" title="Extract isolated instrumental & vocal guide stems via Demucs">
+            🎧 Isolate Vocals (Demucs)
+          </button>
           <button id="btnDismissPreview" class="ghost-btn">Cancel</button>
         </div>
 
@@ -463,6 +466,17 @@
                 <input type="range" id="sliderHighwayOpacity" min="15" max="95" value="65" style="width: 130px;" />
                 <span class="slider-val" id="lblHighwayOpacityVal" style="font-weight: 600; min-width: 38px; color: var(--accent-cyan);">65%</span>
               </div>
+            </div>
+
+            <div class="settings-field-row" id="rowHighwayBlur" style="margin-top: 12px;">
+              <div class="settings-field-label">
+                <span>Highway Background Blur</span>
+                <span class="settings-field-desc">Frosted glass blur behind notes (disable for crisp video or lower GPU usage)</span>
+              </div>
+              <label class="switch">
+                <input type="checkbox" id="toggleHighwayBlur" checked />
+                <span class="switch-slider"></span>
+              </label>
             </div>
 
             <div class="settings-field-row" id="rowPlayheadColor" style="margin-top: 12px;">
